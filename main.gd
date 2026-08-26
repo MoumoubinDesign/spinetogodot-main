@@ -85,84 +85,43 @@ var _current_skin: String = "default"
 		if _current_skin == value:
 			return
 		_current_skin = value
-		_update_visibility()
+		_update_visual()
 
 var _switch_name: String = ""
 @export var 切换名: String:
 	get:
 		return _switch_name
 	set(value):
-		if _switch_name == value:
-			return
 		_switch_name = value
-		_update_visibility()
+		_update_visual()
 
 func _ready():
-	_update_visibility()
+	_update_visual()
 
 func set_skin(skin_name: String) -> void:
-	if _current_skin != skin_name:
-		_current_skin = skin_name
-		_update_visibility()
+	_current_skin = skin_name
+	_update_visual()
 
-func _clean_name(name_str: String) -> String:
-	if name_str.is_empty():
-		return ""
-	var base = name_str
-	var slash_pos = base.rfind("/")
-	if slash_pos != -1:
-		base = base.substr(slash_pos + 1)
-	return base
+func apply_skin_data(skin_name: String) -> void:
+	_current_skin = skin_name
+	_update_visual()
 
-func _update_visibility():
-	var children = get_children()
-	if children.is_empty():
-		return
+func _update_visual() -> void:
+	var skin_mgr = _find_skin_manager()
+	if skin_mgr and skin_mgr.has_method("update_slot_visual"):
+		skin_mgr.call("update_slot_visual", self, name, _switch_name)
 
-	var best_match_remote: RemoteTransform2D = null
-	var fallback_match_remote: RemoteTransform2D = null
-	var skin_match_remote: RemoteTransform2D = null
-	var default_remote: RemoteTransform2D = null
-
-	var clean_slot_att = _clean_name(_switch_name)
-
-	for child in children:
-		if child is RemoteTransform2D:
-			var raw_name = child.name.trim_prefix("Remote_").trim_prefix("Slot_")
-			var parts = raw_name.split("__")
-			var item_skin = ""
-			var item_att = ""
-			if parts.size() >= 2:
-				item_skin = parts[0]
-				item_att = "__".join(parts.slice(1))
-			else:
-				item_skin = "default"
-				item_att = raw_name
-
-			var clean_item_att = _clean_name(item_att)
-
-			if _switch_name != "" and (item_att == _switch_name or clean_item_att == clean_slot_att):
-				if item_skin == _current_skin:
-					best_match_remote = child
-				elif item_skin == "default":
-					fallback_match_remote = child
-			
-			if item_skin == _current_skin and skin_match_remote == null:
-				skin_match_remote = child
-			elif item_skin == "default" and default_remote == null:
-				default_remote = child
-
-	var chosen_remote = best_match_remote
-	if chosen_remote == null:
-		chosen_remote = fallback_match_remote
-	if chosen_remote == null:
-		chosen_remote = skin_match_remote if skin_match_remote != null else default_remote
-
-	for child in children:
-		if child is RemoteTransform2D:
-			var target_node = child.get_node_or_null(child.remote_path)
-			if target_node:
-				target_node.visible = (child == chosen_remote)
+func _find_skin_manager() -> Node:
+	var p = get_parent()
+	while p:
+		var mgr = p.get_node_or_null("SpineToGodotSkinManager")
+		if mgr:
+			return mgr
+		for child in p.get_children():
+			if child is SpineToGodotSkinManager or child.name == "SpineToGodotSkinManager":
+				return child
+		p = p.get_parent()
+	return null
 """
 		file.store_string(default_content)
 		file.close()
@@ -189,6 +148,12 @@ extends Node
 		available_skins = value
 		notify_property_list_changed()
 
+## 图集页面纹理字典 { "xxx.png": Texture2D }
+@export var textures: Dictionary = {}
+
+## 全量皮肤切片与网格数据包
+@export var skins_data: Dictionary = {}
+
 ## 当前激活的皮肤
 var _current_skin: String = "default"
 
@@ -214,7 +179,50 @@ func _get_property_list() -> Array[Dictionary]:
 	return properties
 
 func _ready() -> void:
+	_init_textures()
 	apply_skin(_current_skin)
+
+## 自动初始化并发现各图集页面纹理
+func _init_textures() -> void:
+	var root = get_parent()
+	if not root:
+		return
+	
+	var visuals = root.get_node_or_null("Visuals")
+	if visuals:
+		for child in visuals.get_children():
+			if child is Sprite2D and child.texture is AtlasTexture:
+				var a_tex = child.texture as AtlasTexture
+				if a_tex.atlas:
+					var p_name = a_tex.atlas.resource_path.get_file()
+					if p_name != "" and not textures.has(p_name):
+						textures[p_name] = a_tex.atlas
+			elif child is Polygon2D and child.texture:
+				var p_name = child.texture.resource_path.get_file()
+				if p_name != "" and not textures.has(p_name):
+					textures[p_name] = child.texture
+	
+	var base_dir = ""
+	for k in textures:
+		if textures[k] is Texture2D and textures[k].resource_path != "":
+			base_dir = textures[k].resource_path.get_base_dir()
+			break
+	if base_dir == "" and root.scene_file_path != "":
+		base_dir = root.scene_file_path.get_base_dir()
+	
+	if base_dir != "":
+		if not base_dir.ends_with("/"):
+			base_dir += "/"
+		for sk in skins_data:
+			for slot_name in skins_data[sk]:
+				for att_name in skins_data[sk][slot_name]:
+					var page_name = skins_data[sk][slot_name][att_name].get("page", "")
+					if page_name != "" and not textures.has(page_name):
+						var full_path = base_dir + page_name
+						if ResourceLoader.exists(full_path):
+							var loaded = load(full_path)
+							if loaded is Texture2D:
+								textures[page_name] = loaded
 
 ## 代码换装接口：调用 set_skin("皮肤名") 即可一秒切换皮肤
 func set_skin(skin_name: String) -> void:
@@ -225,6 +233,8 @@ func set_skin(skin_name: String) -> void:
 ## 应用皮肤到所有插槽
 func apply_skin(skin_name: String) -> void:
 	_current_skin = skin_name
+	if textures.is_empty():
+		_init_textures()
 	var root = get_parent()
 	if root:
 		_update_slots_recursive(root, skin_name)
@@ -232,12 +242,120 @@ func apply_skin(skin_name: String) -> void:
 func _update_slots_recursive(node: Node, skin_name: String) -> void:
 	if node == self:
 		return
-	if node is 插槽 or node.has_method("set_skin"):
-		node.set_skin(skin_name)
+	if node.has_method("apply_skin_data"):
+		node.call("apply_skin_data", skin_name)
+	elif node.has_method("set_skin"):
+		node.call("set_skin", skin_name)
+	
 	for child in node.get_children():
 		if child != self:
 			_update_slots_recursive(child, skin_name)
+
+## 单插槽动态置换引擎
+func update_slot_visual(slot_node: Node, slot_name: String, attachment_name: String) -> void:
+	var skin_name = _current_skin
+	var att_data = _find_attachment_data(skin_name, slot_name, attachment_name)
+	
+	var remote: RemoteTransform2D = slot_node.get_node_or_null("Remote_Visual") as RemoteTransform2D
+	if not remote:
+		for child in slot_node.get_children():
+			if child is RemoteTransform2D:
+				remote = child
+				break
+	
+	if not remote:
+		return
+	
+	var visual_node = remote.get_node_or_null(remote.remote_path)
+	if not visual_node:
+		return
+	
+	if att_data.is_empty():
+		visual_node.visible = false
+		return
+	
+	var page_name = att_data.get("page", "")
+	var raw_tex = textures.get(page_name, null)
+	var tex: Texture2D = null
+	if raw_tex is Texture2D:
+		tex = raw_tex
+	elif raw_tex is String and raw_tex != "":
+		if ResourceLoader.exists(raw_tex):
+			var loaded = ResourceLoader.load(raw_tex)
+			if loaded is Texture2D:
+				tex = loaded
+	
+	if not tex and page_name != "":
+		_init_textures()
+		if textures.has(page_name) and textures[page_name] is Texture2D:
+			tex = textures[page_name]
+	
+	var att_type = att_data.get("type", "region")
+	
+	if visual_node is Sprite2D:
+		var atlas_tex = visual_node.texture as AtlasTexture
+		if not atlas_tex:
+			atlas_tex = AtlasTexture.new()
+			visual_node.texture = atlas_tex
+		
+		if tex:
+			atlas_tex.atlas = tex
+		atlas_tex.region = att_data.get("region", Rect2())
+		atlas_tex.margin = att_data.get("margin", Rect2())
+		
+		remote.position = att_data.get("position", Vector2.ZERO)
+		remote.rotation_degrees = att_data.get("rotation", 0.0)
+		remote.scale = att_data.get("scale", Vector2.ONE)
+		visual_node.visible = true
+		
+	elif visual_node is Polygon2D:
+		if tex:
+			visual_node.texture = tex
+		visual_node.texture_offset = att_data.get("texture_offset", Vector2.ZERO)
+		visual_node.uv = att_data.get("uv", PackedVector2Array())
+		visual_node.polygon = att_data.get("polygon", PackedVector2Array())
+		visual_node.polygons = att_data.get("polygons", [])
+		if att_data.has("bones"):
+			visual_node.bones = att_data["bones"]
+		if att_data.has("internal_vertex_count"):
+			visual_node.internal_vertex_count = att_data["internal_vertex_count"]
+		visual_node.visible = true
+
+func _find_attachment_data(skin_name: String, slot_name: String, att_name: String) -> Dictionary:
+	if skins_data.is_empty():
+		return {}
+	
+	var search_skins = [skin_name]
+	if skin_name != "default":
+		search_skins.append("default")
+	
+	for sk in search_skins:
+		if skins_data.has(sk) and skins_data[sk].has(slot_name):
+			var slot_atts: Dictionary = skins_data[sk][slot_name]
+			if att_name != "":
+				if slot_atts.has(att_name):
+					return slot_atts[att_name]
+				var clean_target = _clean_name(att_name)
+				for k in slot_atts:
+					if _clean_name(k) == clean_target:
+						return slot_atts[k]
+			else:
+				for k in slot_atts:
+					return slot_atts[k]
+					
+	return {}
+
+func _clean_name(name_str: String) -> String:
+	if name_str.is_empty():
+		return ""
+	var base = name_str
+	var slash_pos = base.rfind("/")
+	if slash_pos != -1:
+		base = base.substr(slash_pos + 1)
+	return base
 """
+		file.store_string(default_content)
+		file.close()
 		file.store_string(default_content)
 		file.close()
 
