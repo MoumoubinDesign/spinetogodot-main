@@ -71,32 +71,176 @@ func on_安装脚本_dir_selected(path: String):
 		dir.make_dir_recursive(path+"/addons/spine/")
 	
 	# 检查文件是否存在
-	if not FileAccess.file_exists(path+"/addons/spine/插槽.gd"):
-		var file = FileAccess.open(path+"/addons/spine/插槽.gd", FileAccess.WRITE)
-		var default_content = """
-@tool
-class_name 插槽 
+	if not FileAccess.file_exists(path+"/addons/spine/spine_to_godot_slot.gd"):
+		var file = FileAccess.open(path+"/addons/spine/spine_to_godot_slot.gd", FileAccess.WRITE)
+		var default_content = """@tool
+class_name SpineToGodotSlot
 extends Node2D
 
-@export var 切换名: String = "":
+var _current_skin: String = "default"
+@export var 当前皮肤: String:
+	get:
+		return _current_skin
 	set(value):
-		切换名 = value
+		if _current_skin == value:
+			return
+		_current_skin = value
+		_update_visibility()
+
+var _switch_name: String = ""
+@export var 切换名: String:
+	get:
+		return _switch_name
+	set(value):
+		if _switch_name == value:
+			return
+		_switch_name = value
 		_update_visibility()
 
 func _ready():
 	_update_visibility()
 
+func set_skin(skin_name: String) -> void:
+	if _current_skin != skin_name:
+		_current_skin = skin_name
+		_update_visibility()
+
+func _clean_name(name_str: String) -> String:
+	if name_str.is_empty():
+		return ""
+	var base = name_str
+	var slash_pos = base.rfind("/")
+	if slash_pos != -1:
+		base = base.substr(slash_pos + 1)
+	return base
+
 func _update_visibility():
-	for child in get_children():
+	var children = get_children()
+	if children.is_empty():
+		return
+
+	var best_match_remote: RemoteTransform2D = null
+	var fallback_match_remote: RemoteTransform2D = null
+	var skin_match_remote: RemoteTransform2D = null
+	var default_remote: RemoteTransform2D = null
+
+	var clean_slot_att = _clean_name(_switch_name)
+
+	for child in children:
+		if child is RemoteTransform2D:
+			var raw_name = child.name.trim_prefix("Remote_").trim_prefix("Slot_")
+			var parts = raw_name.split("__")
+			var item_skin = ""
+			var item_att = ""
+			if parts.size() >= 2:
+				item_skin = parts[0]
+				item_att = "__".join(parts.slice(1))
+			else:
+				item_skin = "default"
+				item_att = raw_name
+
+			var clean_item_att = _clean_name(item_att)
+
+			if _switch_name != "" and (item_att == _switch_name or clean_item_att == clean_slot_att):
+				if item_skin == _current_skin:
+					best_match_remote = child
+				elif item_skin == "default":
+					fallback_match_remote = child
+			
+			if item_skin == _current_skin and skin_match_remote == null:
+				skin_match_remote = child
+			elif item_skin == "default" and default_remote == null:
+				default_remote = child
+
+	var chosen_remote = best_match_remote
+	if chosen_remote == null:
+		chosen_remote = fallback_match_remote
+	if chosen_remote == null:
+		chosen_remote = skin_match_remote if skin_match_remote != null else default_remote
+
+	for child in children:
 		if child is RemoteTransform2D:
 			var target_node = child.get_node_or_null(child.remote_path)
 			if target_node:
-				var match_name = child.name.trim_prefix("Remote_").trim_prefix("Slot_")
-				target_node.visible = (match_name == 切换名)
-		"""
+				target_node.visible = (child == chosen_remote)
+"""
+		file.store_string(default_content)
+		file.close()
+
+	if not FileAccess.file_exists(path+"/addons/spine/插槽.gd"):
+		var file = FileAccess.open(path+"/addons/spine/插槽.gd", FileAccess.WRITE)
+		var default_content = """@tool
+class_name 插槽
+extends SpineToGodotSlot
+"""
 		file.store_string(default_content)
 		file.close()
 	
+	# 检查文件是否存在
+	if not FileAccess.file_exists(path+"/addons/spine/spine_to_godot_skin_manager.gd"):
+		var file = FileAccess.open(path+"/addons/spine/spine_to_godot_skin_manager.gd", FileAccess.WRITE)
+		var default_content = """@tool
+class_name SpineToGodotSkinManager
+extends Node
+
+## 可用的皮肤列表
+@export var available_skins: Array[String] = ["default"]:
+	set(value):
+		available_skins = value
+		notify_property_list_changed()
+
+## 当前激活的皮肤
+var _current_skin: String = "default"
+
+var current_skin: String:
+	get:
+		return _current_skin
+	set(value):
+		if _current_skin == value:
+			return
+		_current_skin = value
+		apply_skin(value)
+
+func _get_property_list() -> Array[Dictionary]:
+	var properties: Array[Dictionary] = []
+	var enum_string = ",".join(available_skins)
+	properties.append({
+		"name": "current_skin",
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_ENUM,
+		"hint_string": enum_string,
+		"usage": PROPERTY_USAGE_DEFAULT
+	})
+	return properties
+
+func _ready() -> void:
+	apply_skin(_current_skin)
+
+## 代码换装接口：调用 set_skin("皮肤名") 即可一秒切换皮肤
+func set_skin(skin_name: String) -> void:
+	if _current_skin != skin_name:
+		_current_skin = skin_name
+	apply_skin(skin_name)
+
+## 应用皮肤到所有插槽
+func apply_skin(skin_name: String) -> void:
+	_current_skin = skin_name
+	var root = get_parent()
+	if root:
+		_update_slots_recursive(root, skin_name)
+
+func _update_slots_recursive(node: Node, skin_name: String) -> void:
+	if node == self:
+		return
+	if node is 插槽 or node.has_method("set_skin"):
+		node.set_skin(skin_name)
+	for child in node.get_children():
+		if child != self:
+			_update_slots_recursive(child, skin_name)
+"""
+		file.store_string(default_content)
+		file.close()
+
 	# 检查文件是否存在
 	if not FileAccess.file_exists(path+"/addons/spine/no_rotation.gd"):
 		var file = FileAccess.open(path+"/addons/spine/no_rotation.gd", FileAccess.WRITE)

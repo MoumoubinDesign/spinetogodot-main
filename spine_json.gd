@@ -61,6 +61,26 @@ func 保存文件(json路径,导出路径):
 	图集数据 = 加载atlas图集(atlas路径)
 	
 	var json = load(json路径)
+	
+	# 创建换装管理器
+	var all_skin_names: Array[String] = []
+	if json.data.has("skins"):
+		for sk in json.data["skins"]:
+			if sk.has("name"):
+				all_skin_names.append(sk["name"])
+	if all_skin_names.is_empty():
+		all_skin_names = ["default"]
+
+	var skin_mgr = Node.new()
+	var skin_script = load("res://addons/spine/spine_to_godot_skin_manager.gd")
+	if skin_script:
+		skin_mgr.set_script(skin_script)
+	skin_mgr.name = "SpineToGodotSkinManager"
+	skin_mgr.set("available_skins", all_skin_names)
+	skin_mgr.set("current_skin", all_skin_names[0])
+	node_2d.add_child(skin_mgr)
+	skin_mgr.owner = node_2d
+
 	var g = 生成骨骼(json)
 	var c = 生成插槽(json,g[0],g[1])
 	创建动画(json,g[0],g[1],c)
@@ -81,66 +101,305 @@ func 预览文件(json路径):
 	图集数据 = 加载atlas图集(atlas路径)
 	
 	var json = load(json路径)
+	
+	# 创建换装管理器
+	var all_skin_names: Array[String] = []
+	if json.data.has("skins"):
+		for sk in json.data["skins"]:
+			if sk.has("name"):
+				all_skin_names.append(sk["name"])
+	if all_skin_names.is_empty():
+		all_skin_names = ["default"]
+
+	var skin_mgr = Node.new()
+	var skin_script = load("res://addons/spine/spine_to_godot_skin_manager.gd")
+	if skin_script:
+		skin_mgr.set_script(skin_script)
+	skin_mgr.name = "SpineToGodotSkinManager"
+	skin_mgr.set("available_skins", all_skin_names)
+	skin_mgr.set("current_skin", all_skin_names[0])
+	node_2d.add_child(skin_mgr)
+	skin_mgr.owner = node_2d
+
 	var g = 生成骨骼(json)
 	var c = 生成插槽(json,g[0],g[1])
 	创建动画(json,g[0],g[1],c)
 	return node_2d
 
 
-func 修复依赖路径(file_path):
+func 修复依赖路径(file_path: String):
 	var file = FileAccess.open(file_path, FileAccess.READ)
+	if not file:
+		return
 	var content = file.get_as_text()
 	file.close()
 	
-	# 替换内容
-	content = content.replace("metadata/atlas_path = ", "atlas = ExtResource(")# 精灵图
-	content = content.replace("metadata/png_path = ", "texture = ExtResource(")# 网格
+	# 1. 替换 metadata 占位符为 ExtResource
+	content = content.replace("metadata/atlas_path = \"", "atlas = ExtResource(\"")
+	content = content.replace("metadata/png_path = \"", "texture = ExtResource(\"")
 	content = content.replace(".png_ExtResource\"", ".png\")")
+	
+	# 2. 清除所有 ext_resource 和场景头部中的本机非法 UID，避免跨项目导入时产生 UID 报错/警告
+	var lines = content.split("\n")
+	var new_lines = []
+	for l in lines:
+		var cleaned = l
+		if cleaned.begins_with("[ext_resource") or cleaned.begins_with("[gd_scene"):
+			var u_start = cleaned.find('uid="uid://')
+			if u_start != -1:
+				var u_end = cleaned.find('"', u_start + 5)
+				if u_end != -1:
+					cleaned = cleaned.substr(0, u_start) + cleaned.substr(u_end + 1).strip_edges(true, false)
+					cleaned = cleaned.replace("  ", " ")
+		new_lines.append(cleaned)
+	content = "\n".join(new_lines)
+	
+	# 3. 收集所有使用的图集 PNG 文件名并插入 Texture2D ExtResource 声明
+	var base_res = res图像路径
+	if base_res != "" and not base_res.ends_with("/"):
+		base_res += "/"
+	
+	var ext_resources_text = ""
+	var pages_to_add: Array = []
+	if 图集数据.has("page_names") and 图集数据["page_names"].size() > 0:
+		pages_to_add = 图集数据["page_names"]
+	elif 图集数据.has("图集图片名") and 图集数据["图集图片名"] != "":
+		pages_to_add = [图集数据["图集图片名"]]
+	
+	for page_name in pages_to_add:
+		var img_res_path = base_res + page_name
+		if not img_res_path.begins_with("res://"):
+			img_res_path = "res://" + img_res_path.trim_prefix("/")
+		ext_resources_text += '[ext_resource type="Texture2D" path="{0}" id="{1}"]\n'.format([img_res_path, page_name])
+	
 	var n = content.find("[sub_resource")
-	var _ext_text = "[ext_resource type=\"Texture2D\" path=\"{0}\" id=\"{1}\"]".format([res图像路径+图集数据["图集图片名"],图集数据["图集图片名"]])
-	content = content.insert(n,_ext_text+"\n")
+	if n == -1:
+		n = content.find("[node")
+	if n != -1:
+		content = content.insert(n, ext_resources_text)
 	
 	file = FileAccess.open(file_path, FileAccess.WRITE)
-	file.store_string(content)
-	file.close()
-	
+	if file:
+		file.store_string(content)
+		file.close()
 
-func 加载atlas图集(atlas_path):
-	var atlas_dict: Dictionary = {}
+
+func 加载atlas图集(atlas_path: String) -> Dictionary:
+	var atlas_dict: Dictionary = {
+		"pages": {},
+		"regions": {},
+		"page_names": []
+	}
 	
-	var 当前图名 = ''
+	if not FileAccess.file_exists(atlas_path):
+		print("未找到图集文件: ", atlas_path)
+		return atlas_dict
 	
 	var file = FileAccess.open(atlas_path, FileAccess.READ)
+	var current_page = ""
+	var current_region = ""
+	var base_dir = atlas_path.get_base_dir()
+	
 	while file.get_position() < file.get_length():
-		var content = file.get_line()
-		if content.find(":") == -1:
-			if content != "" and content.find(".png") == -1:
-				当前图名 = content
-				atlas_dict[当前图名] = {}
-			if content.find(".png") != -1:# 说明这一行是图集图片名第一行
-				atlas_dict["图集图片名"] = content
-				if 是否浏览:
-					var path = file.get_path().get_base_dir() + '/' + content
-					var img_tex = ImageTexture.new()
-					img_tex.set_image(Image.load_from_file(path))
-					图集Image = img_tex
+		var raw_line = file.get_line()
+		var line = raw_line.strip_edges()
+		if line.is_empty():
+			current_region = ""
+			continue
+		
+		if ":" in line:
+			var colon_pos = line.find(":")
+			var key = line.substr(0, colon_pos).strip_edges().to_lower()
+			var val = line.substr(colon_pos + 1).strip_edges()
+			
+			if current_region != "" and atlas_dict["regions"].has(current_region):
+				var r_data = atlas_dict["regions"][current_region]
+				match key:
+					"rotate":
+						if val.to_lower() == "true":
+							r_data["rotate"] = true
+						elif val.to_lower() == "false":
+							r_data["rotate"] = false
+						else:
+							r_data["rotate"] = val.to_int()
+					"xy":
+						var parts = val.split(",")
+						if parts.size() >= 2:
+							r_data["xy"] = Vector2(parts[0].to_float(), parts[1].to_float())
+					"size":
+						var parts = val.split(",")
+						if parts.size() >= 2:
+							r_data["size"] = Vector2(parts[0].to_float(), parts[1].to_float())
+					"orig":
+						var parts = val.split(",")
+						if parts.size() >= 2:
+							r_data["orig"] = Vector2(parts[0].to_float(), parts[1].to_float())
+					"offset":
+						var parts = val.split(",")
+						if parts.size() >= 2:
+							r_data["offset"] = Vector2(parts[0].to_float(), parts[1].to_float())
+					"index":
+						r_data["index"] = val.to_int()
+			elif current_page != "" and atlas_dict["pages"].has(current_page):
+				var p_data = atlas_dict["pages"][current_page]
+				match key:
+					"size":
+						var parts = val.split(",")
+						if parts.size() >= 2:
+							p_data["size"] = Vector2(parts[0].to_float(), parts[1].to_float())
+					"format":
+						p_data["format"] = val
+					"filter":
+						p_data["filter"] = val
+					"repeat":
+						p_data["repeat"] = val
 		else:
-			if 当前图名 == "":
-				continue
-			if content.find("rotate:") != -1:
-				atlas_dict[当前图名]['rotate'] = str_to_var(content.get_slice(": ", 1))
-			if content.find("xy:") != -1:
-				atlas_dict[当前图名]['xy'] = str_to_var("Vector2("+content.get_slice(": ", 1)+")")
-			if content.find("size:") != -1:
-				atlas_dict[当前图名]['size'] = str_to_var("Vector2("+content.get_slice(": ", 1)+")")
-			if content.find("orig:") != -1:
-				atlas_dict[当前图名]['orig'] = str_to_var("Vector2("+content.get_slice(": ", 1)+")")
-			if content.find("offset:") != -1:
-				atlas_dict[当前图名]['offset'] = str_to_var("Vector2("+content.get_slice(": ", 1)+")")
-			if content.find("index:") != -1:
-				atlas_dict[当前图名]['index'] = str_to_var(content.get_slice(": ", 1))
+			# 没有冒号的行：若以 .png 结尾或尚未有当前页，则为新图集页；否则为切片区域名称
+			if line.to_lower().ends_with(".png") or current_page == "":
+				current_page = line
+				current_region = ""
+				if not atlas_dict["pages"].has(current_page):
+					atlas_dict["page_names"].append(current_page)
+					var p_info = {
+						"name": current_page,
+						"size": Vector2.ZERO,
+						"texture": null
+					}
+					if 是否浏览:
+						var img_path = base_dir + "/" + current_page
+						if FileAccess.file_exists(img_path):
+							var img_tex = ImageTexture.new()
+							var img = Image.load_from_file(img_path)
+							if img:
+								img_tex.set_image(img)
+								p_info["texture"] = img_tex
+					atlas_dict["pages"][current_page] = p_info
+			else:
+				current_region = line
+				atlas_dict["regions"][current_region] = {
+					"name": current_region,
+					"page": current_page,
+					"rotate": false,
+					"xy": Vector2.ZERO,
+					"size": Vector2.ZERO,
+					"orig": Vector2.ZERO,
+					"offset": Vector2.ZERO,
+					"index": -1
+				}
+				
 	file.close()
+	if atlas_dict["page_names"].size() > 0:
+		atlas_dict["图集图片名"] = atlas_dict["page_names"][0]
 	return atlas_dict
+
+
+# 查找图集中的切片信息，提供智能多级匹配与防崩溃安全回退
+func find_atlas_region(atlas_data: Dictionary, skin_name: String, _slot_name: String, att_name: String, att_dict: Dictionary) -> Dictionary:
+	if not atlas_data.has("regions"):
+		return {}
+	var regions: Dictionary = atlas_data["regions"]
+	if regions.is_empty():
+		return {}
+	
+	var path_name = att_dict.get("path", "")
+	var name_name = att_dict.get("name", "")
+	
+	var candidates: Array[String] = []
+	
+	# 优先级 1: path
+	if path_name != "":
+		candidates.append(path_name)
+	# 优先级 2: name
+	if name_name != "":
+		candidates.append(name_name)
+	# 优先级 3: 附件自身名称
+	candidates.append(att_name)
+	
+	# 优先级 4: 带皮肤前缀
+	if skin_name != "" and skin_name != "default":
+		if path_name != "":
+			candidates.append(skin_name + "/" + path_name)
+			candidates.append(skin_name + "__" + path_name)
+			candidates.append(skin_name + "_" + path_name)
+		if name_name != "":
+			candidates.append(skin_name + "/" + name_name)
+			candidates.append(skin_name + "__" + name_name)
+			candidates.append(skin_name + "_" + name_name)
+		candidates.append(skin_name + "/" + att_name)
+		candidates.append(skin_name + "__" + att_name)
+		candidates.append(skin_name + "_" + att_name)
+	
+	# 优先级 5: 去除前置目录的文件名
+	var extra_cands: Array[String] = []
+	for c in candidates:
+		var base = c.get_file()
+		if base != "" and base != c and not extra_cands.has(base):
+			extra_cands.append(base)
+	candidates.append_array(extra_cands)
+	
+	# 1. 精确匹配
+	for c in candidates:
+		if regions.has(c):
+			return regions[c]
+	
+	# 2. 大小写不敏感匹配 / 后缀匹配
+	for c in candidates:
+		var c_lower = c.to_lower()
+		for r_key in regions:
+			if r_key.to_lower() == c_lower:
+				return regions[r_key]
+			if r_key.ends_with("/" + c) or r_key.ends_with("__" + c) or r_key.ends_with("_" + c):
+				return regions[r_key]
+			if r_key.to_lower().ends_with("/" + c_lower) or r_key.to_lower().ends_with("__" + c_lower):
+				return regions[r_key]
+				
+	print("警告：未在图集中找到切片：", att_name, " (皮肤: ", skin_name, ")")
+	
+	# 3. 安全回退：返回首个 page 的默认区域，确保生成器绝不崩溃
+	var fallback_page = ""
+	if atlas_data.has("page_names") and atlas_data["page_names"].size() > 0:
+		fallback_page = atlas_data["page_names"][0]
+	return {
+		"name": att_name,
+		"page": fallback_page,
+		"rotate": false,
+		"xy": Vector2.ZERO,
+		"size": Vector2.ONE,
+		"orig": Vector2.ONE,
+		"offset": Vector2.ZERO,
+		"index": -1
+	}
+
+
+# 解析 linkedmesh 继承的父网格数据
+func find_parent_mesh(json: Object, current_skin_name: String, slot_name: String, parent_mesh_name: String, parent_skin_name: String = "") -> Dictionary:
+	if not json or not json.data.has("skins"):
+		return {}
+	
+	var skins_data = json.data["skins"]
+	var search_skins = []
+	if parent_skin_name != "":
+		search_skins.append(parent_skin_name)
+	search_skins.append(current_skin_name)
+	search_skins.append("default")
+	
+	for sk_name in search_skins:
+		for sk in skins_data:
+			if sk.get("name", "default") == sk_name:
+				var atts = sk.get("attachments", {})
+				if atts.has(slot_name) and atts[slot_name].has(parent_mesh_name):
+					var p_att = atts[slot_name][parent_mesh_name]
+					if p_att.get("type", "") == "mesh":
+						return p_att
+	
+	for sk in skins_data:
+		var atts = sk.get("attachments", {})
+		for s_name in atts:
+			if atts[s_name].has(parent_mesh_name):
+				var p_att = atts[s_name][parent_mesh_name]
+				if p_att.get("type", "") == "mesh":
+					return p_att
+	return {}
 
 
 func sort_ascending(a, b):
@@ -376,31 +635,32 @@ func 生成插槽(json,s,k):
 	node_2d.add_child(visuals)
 	visuals.owner = node_2d
 
+	var slot_script = load("res://addons/spine/spine_to_godot_slot.gd")
+	if not slot_script:
+		slot_script = load("res://addons/spine/插槽.gd")
+
 	# 1. 预先检测哪些插槽包含带权重的网格
 	var slot_has_weights: Dictionary = {}
 	for s_info in json.data.get("slots", []):
 		slot_has_weights[s_info["name"]] = false
 
-	var 皮肤 = [0]
-	if json.data["skins"].size() > 1:
-		皮肤 = [0, 1]
+	for sk in json.data.get("skins", []):
+		var attachments_map = sk.get("attachments", {})
+		for slot_name in attachments_map:
+			for att_name in attachments_map[slot_name]:
+				var a_info = attachments_map[slot_name][att_name]
+				if a_info.has("type") and a_info["type"] == "mesh":
+					var _uvs_check = a_info.get("uvs", [])
+					var _ver_check = a_info.get("vertices", [])
+					if _uvs_check.size() < _ver_check.size():
+						slot_has_weights[slot_name] = true
 
-	for _p in 皮肤:
-		if json.data["skins"].size() > _p:
-			var attachments_map = json.data["skins"][_p].get("attachments", {})
-			for slot_name in attachments_map:
-				for att_name in attachments_map[slot_name]:
-					var a_info = attachments_map[slot_name][att_name]
-					if a_info.has("type") and a_info["type"] == "mesh":
-						var _uvs_check = a_info.get("uvs", [])
-						var _ver_check = a_info.get("vertices", [])
-						if _uvs_check.size() < _ver_check.size():
-							slot_has_weights[slot_name] = true
-
-	# 2. 在骨骼节点下创建【插槽】(插槽保留在骨骼下)
+	# 2. 在骨骼节点下创建【插槽】(插槽保留在骨骼下并显式绑定脚本)
 	var c: Dictionary = {}
 	for i in json.data["slots"]:
-		var _c = 插槽.new() # 用于切换子项
+		var _c = Node2D.new()
+		if slot_script:
+			_c.set_script(slot_script)
 		_c.name = i["name"]
 		var p = i["bone"] # 父骨骼
 		s[p].add_child(_c)
@@ -409,196 +669,206 @@ func 生成插槽(json,s,k):
 		if i.has("color"):
 			_c.modulate = Color(i["color"])
 
-	# 3. 按照 slots 的声明顺序遍历并创建附件，确保 Visuals 容器内的节点顺序与 Spine 渲染层级 100% 一致
+	# 3. 按照 slots 的声明顺序遍历并创建所有皮肤的附件，确保 Visuals 容器内的节点顺序与 Spine 渲染层级 100% 一致
 	for slot_info in json.data["slots"]:
 		var slot_name = slot_info["name"]
 		var _c = c[slot_name] # 对应的骨骼下插槽节点
-		for _p in 皮肤:
-			if json.data["skins"].size() > _p:
-				var skin_attachments = json.data["skins"][_p].get("attachments", {})
-				if skin_attachments.has(slot_name):
-					for i2 in skin_attachments[slot_name]:
-						var a = skin_attachments[slot_name][i2]
-						var _item # 网格或图片引用
-						
-						# 在插槽下创建 RemoteTransform2D 远程连接 Visuals 中的图片/网格
-						var remote = RemoteTransform2D.new()
-						remote.name = "Remote_" + i2
-						_c.add_child(remote)
-						remote.owner = node_2d
-
-						if a.has("type"): # 如果有类型说明是网格
-							if a["type"] == "mesh":
-								# 加载图片
-								var 图片名 = i2
-								if a.has('name'):
-									图片名 = a['name']
-								if a.has("path"): # 有路径说明改名字了
-									图片名 = a["path"]
-								var _poly = Polygon2D.new()
-								_item = _poly
-								
-								var _xy = 图集数据[图片名]["xy"]
-								var _size = 图集数据[图片名]["size"]
-								var _orig = 图集数据[图片名]["orig"]
-								var _offset = 图集数据[图片名]["offset"]
-								_poly.texture_offset = Vector2(_xy[0], _xy[1])
-								_poly.set_meta("png_path", 图集数据['图集图片名'] + "_ExtResource")
-								if 是否浏览:
-									_poly.texture = 图集Image
-								
-								_poly.name = i2
-								visuals.add_child(_poly)
-								_poly.owner = node_2d
-								remote.remote_path = remote.get_path_to(_poly)
-								
-								var uvs: PackedVector2Array = []
-								var _uvs = a["uvs"]
-								var _uvw = a["width"]
-								var _uvh = a["height"]
-								for _i in range(0, _uvs.size(), 2):
-									uvs.append(Vector2(_uvs[_i] * _uvw, _uvs[_i+1] * _uvh))
-								_poly.uv = uvs
-								
-								var _ver = a["vertices"]
-								var points: PackedVector2Array = []
-								var bone_data_map = {}
-								for bone in json.data["bones"]:
-									bone_data_map[bone["name"]] = bone
-								
-								# 如果UV数据比顶点数据多，说明有权重信息
-								if _uvs.size() < _ver.size():
-									# 带权重的网格由 Skeleton2D 权重系统驱动，不更新 RemoteTransform 位置
-									remote.update_position = false
-									remote.update_rotation = false
-									remote.update_scale = false
-
-									var _weights = parse_weights(_ver)
-									for _i_vertex_weights in _weights:
-										var 最终坐标 = Vector2.ZERO
-										for bone_weight_info in _i_vertex_weights:
-											var bone_id_index = bone_weight_info["bone_id"]
-											var bone_name = json.data["bones"][bone_id_index]["name"]
-											var bone_world_matrix = calculate_bone_world_matrix(bone_name, bone_data_map)
-											var local_offset_to_bone = Vector2(bone_weight_info["x"], bone_weight_info["y"])
-											var transformed_point = bone_world_matrix * local_offset_to_bone
-											最终坐标 += transformed_point * bone_weight_info["weight"]
-										
-										最终坐标.y *= -1
-										points.append(最终坐标)
-								else:
-									# 无权重网格受骨骼 RemoteTransform 驱动
-									remote.update_position = true
-									remote.update_rotation = true
-									remote.update_scale = true
-									for _i in range(0, _ver.size(), 2):
-										points.append(Vector2(_ver[_i], _ver[_i+1] * -1))
-
-								_poly.polygon = points
-								_poly.internal_vertex_count = _uvs.size() / 2 - a["hull"]
-								
-								var trianles = []
-								var _triangles = a["triangles"]
-								for _i in range(0, _triangles.size(), 3):
-									var _t = []
-									_t.push_back(_triangles[_i])
-									_t.push_back(_triangles[_i+1])
-									_t.push_back(_triangles[_i+2])
-									trianles.push_back(_t)
-								_poly.polygons = trianles
-								
-								# 生成权重数据
-								if _uvs.size() < _ver.size():
-									_poly.skeleton = _poly.get_path_to(k)
-									var _weights = parse_weights(_ver)
-									var new_bones = []
-									var _sn = 0
-									for _i in s:
-										var new_qz: PackedFloat32Array = []
-										for _a in range(_poly.polygon.size()):
-											var 权重 = 0.0
-											for ii in _weights[_a]:
-												if ii['bone_id'] == _sn:
-													权重 = ii['weight']
-											new_qz.append(权重)
-										var _isq = false
-										for _q in new_qz:
-											if _q != 0:
-												_isq = true
-										if _isq:
-											new_bones.append(k.get_path_to(s[_i]))
-											new_bones.append(new_qz)
-										_sn += 1
-									_poly.bones = new_bones
-								
-								# 隐藏插槽只能显示一个东西
-								_poly.visible = false
-								if slot_info.has("attachment") and slot_info["attachment"] == i2:
-									_poly.visible = true
-									_c.切换名 = i2
+		for sk in json.data.get("skins", []):
+			var skin_name = sk.get("name", "default")
+			var skin_attachments = sk.get("attachments", {})
+			if skin_attachments.has(slot_name):
+				for i2 in skin_attachments[slot_name]:
+					var a = skin_attachments[slot_name][i2]
+					var att_type = a.get("type", "region")
+					
+					# 忽略非图形附件（碰撞框、裁切、路径等）
+					if att_type in ["boundingbox", "clipping", "path", "point"]:
+						continue
+					
+					# 如果是 linkedmesh，解析继承父网格
+					if att_type == "linkedmesh":
+						var parent_mesh_name = a.get("parent", i2)
+						var parent_skin_name = a.get("skin", "")
+						var parent_mesh = find_parent_mesh(json, skin_name, slot_name, parent_mesh_name, parent_skin_name)
+						if not parent_mesh.is_empty():
+							for p_key in ["uvs", "triangles", "vertices", "hull", "edges", "width", "height"]:
+								if parent_mesh.has(p_key) and not a.has(p_key):
+									a[p_key] = parent_mesh[p_key]
+							att_type = "mesh"
 						else:
-							# 加载图片
-							var 图片名 = i2
-							if a.has('name'):
-								图片名 = a['name']
-							if a.has("path"):
-								图片名 = a["path"]
-							var _sprite = Sprite2D.new()
-							_item = _sprite
-							
-							var tex = AtlasTexture.new()
-							var _xy = 图集数据[图片名]["xy"]
-							var _size = 图集数据[图片名]["size"]
-							var _orig = 图集数据[图片名]["orig"]
-							var _offset = 图集数据[图片名]["offset"]
-							tex.region = Rect2(_xy[0], _xy[1], _size[0], _size[1])
-							tex.margin = Rect2(_offset[0], _offset[1], _orig[0]-_size[0], _orig[1]-_size[1])
-							if 是否浏览:
-								tex.atlas = 图集Image
-							_sprite.texture = tex
-							tex.set_meta("atlas_path", 图集数据['图集图片名'] + "_ExtResource")
-							
-							_sprite.name = i2
-							visuals.add_child(_sprite)
-							_sprite.owner = node_2d
-							remote.remote_path = remote.get_path_to(_sprite)
-							
-							# 将图片在骨骼插槽中的局部偏移设置在 RemoteTransform2D 上
-							var pos = Vector2.ZERO
-							if a.has("x"):
-								pos.x = a['x']
-							if a.has("y"):
-								pos.y = a['y'] * -1
-							remote.position = pos
-							
-							if a.has("rotation"):
-								remote.rotation_degrees = a['rotation'] * -1
-							
-							var sca = Vector2.ONE
-							if a.has("scaleX"):
-								sca.x = a['scaleX']
-							if a.has("scaleY"):
-								sca.y = a['scaleY']
-							remote.scale = sca
-							
-							_sprite.visible = false
-							if slot_info.has("attachment") and slot_info["attachment"] == i2:
-								_sprite.visible = true
-								_c.切换名 = i2
+							print("警告：未找到 linkedmesh 的父网格：", parent_mesh_name)
+
+					var visual_node_name = skin_name + "__" + i2
+					var remote_node_name = "Remote_" + skin_name + "__" + i2
+					
+					# 在插槽下创建 RemoteTransform2D 远程连接 Visuals 中的图片/网格
+					var remote = RemoteTransform2D.new()
+					remote.name = remote_node_name
+					_c.add_child(remote)
+					remote.owner = node_2d
+
+					var region_info = find_atlas_region(图集数据, skin_name, slot_name, i2, a)
+					var page_name = region_info.get("page", "")
+					var _xy = region_info.get("xy", Vector2.ZERO)
+					var _size = region_info.get("size", Vector2.ZERO)
+					var _orig = region_info.get("orig", _size)
+					var _offset = region_info.get("offset", Vector2.ZERO)
+					
+					var _item = null
+
+					if att_type == "mesh":
+						var _poly = Polygon2D.new()
+						_item = _poly
+						_poly.texture_offset = Vector2(_xy.x, _xy.y)
+						_poly.set_meta("png_path", page_name + "_ExtResource")
+						if 是否浏览 and 图集数据.get("pages", {}).has(page_name):
+							_poly.texture = 图集数据["pages"][page_name].get("texture")
 						
-						# 材质与混合模式
-						if _item:
-							if slot_info.has("blend"):
-								var _add = false
-								if slot_info.has("attachment") and slot_info["attachment"] == i2:
-									_add = true
-								if slot_info['name'] == slot_name:
-									_add = true
-								if _add:
-									if slot_info["blend"] == "additive":
-										var mat = CanvasItemMaterial.new()
-										mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
-										_item.material = mat
+						_poly.name = visual_node_name
+						visuals.add_child(_poly)
+						_poly.owner = node_2d
+						remote.remote_path = remote.get_path_to(_poly)
+						
+						var uvs: PackedVector2Array = []
+						var _uvs = a.get("uvs", [])
+						var _uvw = a.get("width", _size.x if _size.x > 0 else 100.0)
+						var _uvh = a.get("height", _size.y if _size.y > 0 else 100.0)
+						for _i in range(0, _uvs.size(), 2):
+							uvs.append(Vector2(_uvs[_i] * _uvw, _uvs[_i+1] * _uvh))
+						_poly.uv = uvs
+						
+						var _ver = a.get("vertices", [])
+						var points: PackedVector2Array = []
+						var bone_data_map = {}
+						for bone in json.data.get("bones", []):
+							bone_data_map[bone["name"]] = bone
+						
+						# 如果UV数据比顶点数据多，说明有权重信息
+						if _uvs.size() < _ver.size():
+							# 带权重的网格由 Skeleton2D 权重系统驱动，不更新 RemoteTransform 位置
+							remote.update_position = false
+							remote.update_rotation = false
+							remote.update_scale = false
+
+							var _weights = parse_weights(_ver)
+							for _i_vertex_weights in _weights:
+								var 最终坐标 = Vector2.ZERO
+								for bone_weight_info in _i_vertex_weights:
+									var bone_id_index = bone_weight_info["bone_id"]
+									var bone_name = json.data["bones"][bone_id_index]["name"]
+									var bone_world_matrix = calculate_bone_world_matrix(bone_name, bone_data_map)
+									var local_offset_to_bone = Vector2(bone_weight_info["x"], bone_weight_info["y"])
+									var transformed_point = bone_world_matrix * local_offset_to_bone
+									最终坐标 += transformed_point * bone_weight_info["weight"]
+								
+								最终坐标.y *= -1
+								points.append(最终坐标)
+						else:
+							# 无权重网格受骨骼 RemoteTransform 驱动
+							remote.update_position = true
+							remote.update_rotation = true
+							remote.update_scale = true
+							for _i in range(0, _ver.size(), 2):
+								points.append(Vector2(_ver[_i], _ver[_i+1] * -1))
+
+						_poly.polygon = points
+						var hull_count = a.get("hull", 0)
+						_poly.internal_vertex_count = max(0, int(_uvs.size() / 2) - hull_count)
+						
+						var trianles = []
+						var _triangles = a.get("triangles", [])
+						for _i in range(0, _triangles.size(), 3):
+							if _i + 2 < _triangles.size():
+								var _t = []
+								_t.push_back(_triangles[_i])
+								_t.push_back(_triangles[_i+1])
+								_t.push_back(_triangles[_i+2])
+								trianles.push_back(_t)
+						_poly.polygons = trianles
+						
+						# 生成权重数据
+						if _uvs.size() < _ver.size():
+							_poly.skeleton = _poly.get_path_to(k)
+							var _weights = parse_weights(_ver)
+							var new_bones = []
+							var _sn = 0
+							for _i in s:
+								var new_qz: PackedFloat32Array = []
+								for _a in range(_poly.polygon.size()):
+									var 权重 = 0.0
+									if _a < _weights.size():
+										for ii in _weights[_a]:
+											if ii['bone_id'] == _sn:
+												权重 = ii['weight']
+									new_qz.append(权重)
+								var _isq = false
+								for _q in new_qz:
+									if _q != 0:
+										_isq = true
+								if _isq:
+									new_bones.append(k.get_path_to(s[_i]))
+									new_bones.append(new_qz)
+								_sn += 1
+							_poly.bones = new_bones
+						
+						_poly.visible = false
+					else:
+						# 默认作为图片 (region) 处理
+						var _sprite = Sprite2D.new()
+						_item = _sprite
+						
+						var tex = AtlasTexture.new()
+						tex.region = Rect2(_xy.x, _xy.y, _size.x, _size.y)
+						tex.margin = Rect2(_offset.x, _offset.y, _orig.x - _size.x, _orig.y - _size.y)
+						if 是否浏览 and 图集数据.get("pages", {}).has(page_name):
+							tex.atlas = 图集数据["pages"][page_name].get("texture")
+						_sprite.texture = tex
+						tex.set_meta("atlas_path", page_name + "_ExtResource")
+						
+						_sprite.name = visual_node_name
+						visuals.add_child(_sprite)
+						_sprite.owner = node_2d
+						remote.remote_path = remote.get_path_to(_sprite)
+						
+						# 将图片在骨骼插槽中的局部偏移设置在 RemoteTransform2D 上
+						var pos = Vector2.ZERO
+						if a.has("x"):
+							pos.x = a['x']
+						if a.has("y"):
+							pos.y = a['y'] * -1
+						remote.position = pos
+						
+						if a.has("rotation"):
+							remote.rotation_degrees = a['rotation'] * -1
+						
+						var sca = Vector2.ONE
+						if a.has("scaleX"):
+							sca.x = a['scaleX']
+						if a.has("scaleY"):
+							sca.y = a['scaleY']
+						remote.scale = sca
+						
+						_sprite.visible = false
+					
+					# 材质与混合模式
+					if _item:
+						if slot_info.has("blend"):
+							var _add = false
+							if slot_info.has("attachment") and slot_info["attachment"] == i2:
+								_add = true
+							if slot_info['name'] == slot_name:
+								_add = true
+							if _add:
+								if slot_info["blend"] == "additive":
+									var mat = CanvasItemMaterial.new()
+									mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+									_item.material = mat
+
+		# 初始化插槽的默认切换名
+		if slot_info.has("attachment"):
+			_c.切换名 = slot_info["attachment"]
+		else:
+			_c.切换名 = ""
 	return c
 
 
@@ -741,93 +1011,102 @@ func 创建动画(json,s,_k,c):
 							切换值 = str(_q["name"])
 						animation.track_insert_key(track_index,延迟, 切换值)
 		
-		# 导入顶点动画轨道
+		# 导入顶点动画轨道（支持多皮肤）
 		if lg_anim[i].has("deform"):
-			var 顶点动画数据 = lg_anim[i]["deform"]["default"]
+			var deform_skins_data = lg_anim[i]["deform"]
 			var visuals_node = node_2d.get_node_or_null("Visuals")
-			for 插槽名 in 顶点动画数据:
-				for 网格名 in 顶点动画数据[插槽名]:
-					var 顶点帧 = 顶点动画数据[插槽名][网格名]
-					var _poly: Polygon2D = null
-					if visuals_node:
-						_poly = visuals_node.get_node_or_null(网格名) as Polygon2D
-					if not _poly and c.has(插槽名):
-						for child in c[插槽名].get_children():
-							if child is RemoteTransform2D:
-								var match_name = child.name.trim_prefix("Remote_").trim_prefix("Slot_")
-								if match_name == 网格名:
-									_poly = child.get_node_or_null(child.remote_path) as Polygon2D
-									if _poly: break
-					if not _poly:
-						print("警告: 找不到网格节点: ", 网格名)
-						continue
-					
-					var 顶点径 =  str(node_2d.get_path_to(_poly)) + ":polygon"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
-					animation.track_set_path(track_index, 顶点径)
-					for _vd in 顶点帧:
-						var 延迟 = 0
-						var _offset = 0
-						# 如果源文件中有曲线，会导致这里报错_poly为null
-						var _vertices = _poly.polygon
-						if _vd.has('time'):
-							延迟 = _vd['time']
-							if 预估时长<延迟:
-								预估时长 = 延迟
-						if _vd.has('offset'):
-							_offset = _vd['offset']
-						if _vd.has('vertices') and _poly.bones.size() == 0:# 说明这个网格无权重
-							var _vds = _vd['vertices']# 拷贝顶点数组
-							for _o in range(_offset):
-								_vds.push_front(0)# 补全数组，spine的顶点数组不全
-							if _vds.size()%2 == 1:# 如果是奇数，在末尾补0
-								_vds.push_back(0)
-							var _vn = 0
-							for _i in range(0, _vds.size(), 2):# 把数组变成vector2数组
-								_vertices[_vn] += Vector2(_vds[_i],_vds[_i+1]*-1)# 此时是vector相加
-								_vn += 1
-						if _vd.has('vertices') and _poly.bones.size() > 0:# 说明这个网格有权重
-							var _vds = _vd['vertices']# 拷贝顶点数组
-							if int(_offset)%2==1:# 如果是奇数前面加0
-								_vds.push_front(0)
-								_offset-=1# 说明缺少第一个点的x轴
-							if _vds.size()%2==1:# 说明最后一个点缺少y轴
-								_vds.push_back(0)
-							# 获取该顶点受到几根骨骼影响
-							# 这里忽略皮肤
-							var 权重网格 = json.data['skins'][0]['attachments'][插槽名][网格名]["vertices"]
-							var _weights = parse_weights(权重网格)
-							"""
-							print("---------------------------")
-							print("点数："+str(_weights.size()))
-							print("动画名:"+str(动画名))
-							print("插槽名:"+str(插槽名))
-							print("网格名:"+str(网格名))
-							print("poly顶点数组数量："+str(_vertices.size()))
-							print("顶点动画数组数量："+str(_vds.size()))
-							print("权重网格数量:"+str(_weights.size()))
-							"""
-							var 点数组 = []# 构造空点数组
-							var _wn = 0
-							for _w in _weights:
-								#print("_wn:"+str(_wn*2)+"   _offset:"+str(_offset))
-								if _offset <= _wn*2 and (_wn*2-_offset)+1 < _vds.size():
-									#print("---------------:"+str(_wn*2-_offset))
-									var 最终坐标 = Vector2(_vds[(_wn*2-_offset)], _vds[(_wn*2-_offset)+1])
-									最终坐标.y *= -1
-									点数组.append(最终坐标)
-								else:
-									点数组.append(Vector2(0,0))
-								_wn += _w.size()
-							# 根据offset将动画数据加入到空点数组中
-							
-							#print(点数组)
-							#print("点数组数量："+str(点数组.size()))
-							var _vn = 0
-							for _i in 点数组:
-								_vertices[_vn] += _i# 受到骨骼权重影响
-								_vn += 1
-						animation.track_insert_key(track_index,延迟, _vertices)
+			for deform_skin_name in deform_skins_data:
+				var 顶点动画数据 = deform_skins_data[deform_skin_name]
+				for 插槽名 in 顶点动画数据:
+					for 网格名 in 顶点动画数据[插槽名]:
+						var 顶点帧 = 顶点动画数据[插槽名][网格名]
+						var target_visual_name = deform_skin_name + "__" + 网格名
+						var _poly: Polygon2D = null
+						if visuals_node:
+							_poly = visuals_node.get_node_or_null(target_visual_name) as Polygon2D
+							if not _poly:
+								_poly = visuals_node.get_node_or_null(网格名) as Polygon2D
+						if not _poly and c.has(插槽名):
+							for child in c[插槽名].get_children():
+								if child is RemoteTransform2D:
+									var match_name = child.name.trim_prefix("Remote_").trim_prefix("Slot_")
+									if match_name == target_visual_name or match_name.ends_with("__" + 网格名):
+										_poly = child.get_node_or_null(child.remote_path) as Polygon2D
+										if _poly: break
+						if not _poly:
+							continue
+						
+						var 顶点径 =  str(node_2d.get_path_to(_poly)) + ":polygon"
+						var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+						animation.track_set_path(track_index, 顶点径)
+						for _vd in 顶点帧:
+							var 延迟 = 0
+							var _offset = 0
+							var _vertices = _poly.polygon.duplicate()
+							if _vd.has('time'):
+								延迟 = _vd['time']
+								if 预估时长<延迟:
+									预估时长 = 延迟
+							if _vd.has('offset'):
+								_offset = _vd['offset']
+							if _vd.has('vertices') and _poly.bones.size() == 0:# 说明这个网格无权重
+								var _vds = _vd['vertices']# 拷贝顶点数组
+								for _o in range(_offset):
+									_vds.push_front(0)# 补全数组，spine的顶点数组不全
+								if _vds.size()%2 == 1:# 如果是奇数，在末尾补0
+									_vds.push_back(0)
+								var _vn = 0
+								for _i in range(0, _vds.size(), 2):# 把数组变成vector2数组
+									_vertices[_vn] += Vector2(_vds[_i],_vds[_i+1]*-1)# 此时是vector相加
+									_vn += 1
+							if _vd.has('vertices') and _poly.bones.size() > 0:# 说明这个网格有权重
+								var _vds = _vd['vertices']# 拷贝顶点数组
+								if int(_offset)%2==1:# 如果是奇数前面加0
+									_vds.push_front(0)
+									_offset-=1# 说明缺少第一个点的x轴
+								if _vds.size()%2==1:# 说明最后一个点缺少y轴
+									_vds.push_back(0)
+								
+								# 查找对应皮肤下的权重网格顶点
+								var 权重网格 = []
+								for sk_find in json.data.get('skins', []):
+									if sk_find.get('name', '') == deform_skin_name:
+										var atts_find = sk_find.get('attachments', {})
+										if atts_find.has(插槽名) and atts_find[插槽名].has(网格名):
+											var att_obj = atts_find[插槽名][网格名]
+											if att_obj.get("type", "") == "linkedmesh":
+												var p_mesh = find_parent_mesh(json, deform_skin_name, 插槽名, att_obj.get("parent", 网格名), att_obj.get("skin", ""))
+												权重网格 = p_mesh.get("vertices", [])
+											else:
+												权重网格 = att_obj.get("vertices", [])
+											break
+								if 权重网格.is_empty() and json.data.get('skins', []).size() > 0:
+									var def_atts = json.data['skins'][0].get('attachments', {})
+									if def_atts.has(插槽名) and def_atts[插槽名].has(网格名):
+										var att_obj = def_atts[插槽名][网格名]
+										if att_obj.get("type", "") == "linkedmesh":
+											var p_mesh = find_parent_mesh(json, "default", 插槽名, att_obj.get("parent", 网格名), att_obj.get("skin", ""))
+											权重网格 = p_mesh.get("vertices", [])
+										else:
+											权重网格 = def_atts[插槽名][网格名].get("vertices", [])
+								
+								var _weights = parse_weights(权重网格)
+								var 点数组 = []
+								var _wn = 0
+								for _w in _weights:
+									if _offset <= _wn*2 and (_wn*2-_offset)+1 < _vds.size():
+										var 最终坐标 = Vector2(_vds[(_wn*2-_offset)], _vds[(_wn*2-_offset)+1])
+										最终坐标.y *= -1
+										点数组.append(最终坐标)
+									else:
+										点数组.append(Vector2(0,0))
+									_wn += _w.size()
+								
+								var _vn = 0
+								for _i in 点数组:
+									_vertices[_vn] += _i
+									_vn += 1
+							animation.track_insert_key(track_index,延迟, _vertices)
 		
 		if lg_anim[i].has("bones"):
 			var 骨骼动画数据 = lg_anim[i]["bones"]
