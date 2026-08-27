@@ -81,8 +81,16 @@ func 加载动画():
 		if i as AnimationPlayer:
 			anim = i
 			var _list = anim.get_animation_list()
-			for anim_name in _list:
+			var selected_idx = 0
+			for idx in range(_list.size()):
+				var anim_name = _list[idx]
 				%OptionButton.add_item(anim_name)
+				if anim.autoplay != "" and anim_name == anim.autoplay:
+					selected_idx = idx
+			if %OptionButton.item_count > 0:
+				%OptionButton.select(selected_idx)
+				if anim.autoplay != "":
+					anim.play(anim.autoplay)
 
 func _on_button_pressed() -> void:
 	var anim:AnimationPlayer

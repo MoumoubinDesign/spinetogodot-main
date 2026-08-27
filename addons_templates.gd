@@ -1,4 +1,304 @@
-@tool
+class_name AddonsTemplates
+
+const PLUGIN_CFG = """[plugin]
+
+name="Spine"
+description="转换json文件为场景"
+author="柯哀的眼"
+version="1.0"
+script="spine.gd"
+"""
+
+const NO_ROTATION_GD = """@tool
+class_name NoRotation extends Node2D
+
+@export var 旋转:bool = true
+@export var 缩放:bool = true
+
+
+func _process(_delta: float) -> void:
+	if not 旋转:
+		get_parent().global_rotation = rotation
+	if not 缩放:
+		get_parent().global_scale = scale
+"""
+
+const SLOT_ALIAS_GD = """@tool
+class_name 插槽
+extends SpineToGodotSlot
+"""
+
+const SPINE_TO_GODOT_SLOT_GD = """@tool
+class_name SpineToGodotSlot
+extends Node2D
+
+var _current_skin: String = "default"
+@export var 当前皮肤: String:
+	get:
+		return _current_skin
+	set(value):
+		if _current_skin == value:
+			return
+		_current_skin = value
+		_update_visual()
+
+var _switch_name: String = ""
+@export var 切换名: String:
+	get:
+		return _switch_name
+	set(value):
+		_switch_name = value
+		_update_visual()
+
+func _ready():
+	_update_visual()
+
+func set_skin(skin_name: String) -> void:
+	_current_skin = skin_name
+	_update_visual()
+
+func apply_skin_data(skin_name: String) -> void:
+	_current_skin = skin_name
+	_update_visual()
+
+func _update_visual() -> void:
+	var skin_mgr = _find_skin_manager()
+	if skin_mgr and skin_mgr.has_method("update_slot_visual"):
+		skin_mgr.call("update_slot_visual", self, name, _switch_name)
+
+func _find_skin_manager() -> Node:
+	var p = get_parent()
+	while p:
+		var mgr = p.get_node_or_null("SpineToGodotSkinManager")
+		if mgr:
+			return mgr
+		# 若自身父节点即为包含管理器的根节点
+		for child in p.get_children():
+			if child is SpineToGodotSkinManager or child.name == "SpineToGodotSkinManager":
+				return child
+		p = p.get_parent()
+	return null
+"""
+
+const SPINE_TO_GODOT_SKIN_MANAGER_GD = """@tool
+class_name SpineToGodotSkinManager
+extends Node
+
+## 可用的皮肤列表
+@export var available_skins: Array[String] = ["default"]:
+	set(value):
+		available_skins = value
+		notify_property_list_changed()
+
+## 图集页面纹理字典 { "xxx.png": Texture2D }
+@export var textures: Dictionary = {}
+
+## 全量皮肤切片与网格数据包
+@export var skins_data: Dictionary = {}
+
+## 当前激活的皮肤
+var _current_skin: String = "default"
+
+var current_skin: String:
+	get:
+		return _current_skin
+	set(value):
+		if _current_skin == value:
+			return
+		_current_skin = value
+		apply_skin(value)
+
+func _get_property_list() -> Array[Dictionary]:
+	var properties: Array[Dictionary] = []
+	var enum_string = ",".join(available_skins)
+	properties.append({
+		"name": "current_skin",
+		"type": TYPE_STRING,
+		"hint": PROPERTY_HINT_ENUM,
+		"hint_string": enum_string,
+		"usage": PROPERTY_USAGE_DEFAULT
+	})
+	return properties
+
+func _ready() -> void:
+	_init_textures()
+	apply_skin(_current_skin)
+
+## 自动初始化并发现各图集页面纹理
+func _init_textures() -> void:
+	var root = get_parent()
+	if not root:
+		return
+	
+	# 1. 从 Visuals 子节点中收集已绑定的 Texture
+	var visuals = root.get_node_or_null("Visuals")
+	if visuals:
+		for child in visuals.get_children():
+			if child is Sprite2D and child.texture is AtlasTexture:
+				var a_tex = child.texture as AtlasTexture
+				if a_tex.atlas:
+					var p_name = a_tex.atlas.resource_path.get_file()
+					if p_name != "" and not textures.has(p_name):
+						textures[p_name] = a_tex.atlas
+			elif child is Polygon2D and child.texture:
+				var p_name = child.texture.resource_path.get_file()
+				if p_name != "" and not textures.has(p_name):
+					textures[p_name] = child.texture
+	
+	# 2. 对多页图集，根据当前已有纹理所在目录自动补充载入其余页面
+	var base_dir = ""
+	for k in textures:
+		if textures[k] is Texture2D and textures[k].resource_path != "":
+			base_dir = textures[k].resource_path.get_base_dir()
+			break
+	if base_dir == "" and root.scene_file_path != "":
+		base_dir = root.scene_file_path.get_base_dir()
+	
+	if base_dir != "":
+		if not base_dir.ends_with("/"):
+			base_dir += "/"
+		for sk in skins_data:
+			for slot_name in skins_data[sk]:
+				for att_name in skins_data[sk][slot_name]:
+					var page_name = skins_data[sk][slot_name][att_name].get("page", "")
+					if page_name != "" and not textures.has(page_name):
+						var full_path = base_dir + page_name
+						if ResourceLoader.exists(full_path):
+							var loaded = load(full_path)
+							if loaded is Texture2D:
+								textures[page_name] = loaded
+
+## 代码换装接口：调用 set_skin("皮肤名") 即可一秒切换皮肤
+func set_skin(skin_name: String) -> void:
+	if _current_skin != skin_name:
+		_current_skin = skin_name
+	apply_skin(skin_name)
+
+## 应用皮肤到所有插槽
+func apply_skin(skin_name: String) -> void:
+	_current_skin = skin_name
+	if textures.is_empty():
+		_init_textures()
+	var root = get_parent()
+	if root:
+		_update_slots_recursive(root, skin_name)
+
+func _update_slots_recursive(node: Node, skin_name: String) -> void:
+	if node == self:
+		return
+	if node.has_method("apply_skin_data"):
+		node.call("apply_skin_data", skin_name)
+	elif node.has_method("set_skin"):
+		node.call("set_skin", skin_name)
+	
+	for child in node.get_children():
+		if child != self:
+			_update_slots_recursive(child, skin_name)
+
+## 单插槽动态置换引擎
+func update_slot_visual(slot_node: Node, slot_name: String, attachment_name: String) -> void:
+	var skin_name = _current_skin
+	var att_data = _find_attachment_data(skin_name, slot_name, attachment_name)
+	
+	var remote: RemoteTransform2D = slot_node.get_node_or_null("Remote_Visual") as RemoteTransform2D
+	if not remote:
+		for child in slot_node.get_children():
+			if child is RemoteTransform2D:
+				remote = child
+				break
+	
+	if not remote:
+		return
+	
+	var visual_node = remote.get_node_or_null(remote.remote_path)
+	if not visual_node:
+		return
+	
+	if att_data.is_empty():
+		visual_node.visible = false
+		return
+	
+	var page_name = att_data.get("page", "")
+	var raw_tex = textures.get(page_name, null)
+	var tex: Texture2D = null
+	if raw_tex is Texture2D:
+		tex = raw_tex
+	elif raw_tex is String and raw_tex != "":
+		if ResourceLoader.exists(raw_tex):
+			var loaded = ResourceLoader.load(raw_tex)
+			if loaded is Texture2D:
+				tex = loaded
+	
+	# 如果 textures 字典中暂时未找到该 page，尝试按目录补载
+	if not tex and page_name != "":
+		_init_textures()
+		if textures.has(page_name) and textures[page_name] is Texture2D:
+			tex = textures[page_name]
+	
+	if visual_node is Sprite2D:
+		var atlas_tex = visual_node.texture as AtlasTexture
+		if not atlas_tex:
+			atlas_tex = AtlasTexture.new()
+			visual_node.texture = atlas_tex
+		
+		if tex:
+			atlas_tex.atlas = tex
+		atlas_tex.region = att_data.get("region", Rect2())
+		atlas_tex.margin = att_data.get("margin", Rect2())
+		
+		remote.position = att_data.get("position", Vector2.ZERO)
+		remote.rotation_degrees = att_data.get("rotation", 0.0)
+		remote.scale = att_data.get("scale", Vector2.ONE)
+		visual_node.visible = true
+		
+	elif visual_node is Polygon2D:
+		if tex:
+			visual_node.texture = tex
+		visual_node.texture_offset = att_data.get("texture_offset", Vector2.ZERO)
+		visual_node.uv = att_data.get("uv", PackedVector2Array())
+		visual_node.polygon = att_data.get("polygon", PackedVector2Array())
+		visual_node.polygons = att_data.get("polygons", [])
+		if att_data.has("bones"):
+			visual_node.bones = att_data["bones"]
+		if att_data.has("internal_vertex_count"):
+			visual_node.internal_vertex_count = att_data["internal_vertex_count"]
+		visual_node.visible = true
+
+func _find_attachment_data(skin_name: String, slot_name: String, att_name: String) -> Dictionary:
+	if skins_data.is_empty():
+		return {}
+	
+	var search_skins = [skin_name]
+	if skin_name != "default":
+		search_skins.append("default")
+	
+	for sk in search_skins:
+		if skins_data.has(sk) and skins_data[sk].has(slot_name):
+			var slot_atts: Dictionary = skins_data[sk][slot_name]
+			if att_name != "":
+				if slot_atts.has(att_name):
+					return slot_atts[att_name]
+				var clean_target = _clean_name(att_name)
+				for k in slot_atts:
+					if _clean_name(k) == clean_target:
+						return slot_atts[k]
+			else:
+				for k in slot_atts:
+					return slot_atts[k]
+					
+	return {}
+
+func _clean_name(name_str: String) -> String:
+	if name_str.is_empty():
+		return ""
+	var base = name_str
+	var slash_pos = base.rfind("/")
+	if slash_pos != -1:
+		base = base.substr(slash_pos + 1)
+	return base
+"""
+
+const SPINE_PLUGIN_GD = """@tool
 extends EditorPlugin
 
 var node_2d: Node2D
@@ -25,7 +325,6 @@ func on_context_menu_changed():
 	if self.popup_menu.item_count == 0:
 		return
 	var name = self.popup_menu.get_item_text(self.popup_menu.item_count - 1)
-	#print(name)
 	var cur_path:String = get_editor_interface().get_current_path()
 	if not cur_path: return
 	
@@ -53,12 +352,9 @@ func on_context_menu_id_pressed(id:int):
 	选择路径Dialog.popup(Rect2i(200, 200, 1000, 500))
 	选择路径Dialog.connect("dir_selected", on_选择路径_dir_selected)
 	选择路径Dialog.set_title("选择图片目录")
-	
-	
-	
+
 
 func _exit_tree():
-	# Clean-up of the plugin goes here.
 	pass
 
 
@@ -88,28 +384,6 @@ func on_file_selected(path: String):
 	ResourceSaver.save(scene,目录+"/"+导出名+".tscn")
 
 
-
-"""
-注意事项：
-spine项目图片不要存在子文件夹，找不到路径，直接全堆在一起(已解决)
-同名骨骼处理（已解决）
-插槽的位置（已解决）
-保证生成图片的变换正确（已解决）
-只显示插槽中一个（已解决）
-区分外部点和内部点（已解决）
-优化：骨骼信息为0的不加入数据，减少尺寸（已解决）
-优化：解决网格在骨骼中不参与变换的问题，调整Z顺序（已解决）
-欧拉角逆向旋转BUG，修改线性插值模式（已解决）
-插槽的叠加模式，需要图片或网格的材质来做，不方便实现（已解决）
-图像不受插槽颜色改变（已解决）
-皮肤导入（已解决）
-不继承旋转的骨骼导致网格畸形（已解决）
-缺少顶点动画的导入（已解决）
-缺少显示顺序帧
-缺少曲线
-缺少倾斜，godot的倾斜只有左右没有上下
-缺少遮罩
-"""
 func sort_ascending(a, b):
 	var _a = 0
 	var _b = 0
@@ -139,18 +413,18 @@ func 生成骨骼(json):
 		if i.has('parent'):
 			s[i['parent']].add_child(b)
 		else:
-			k.add_child(b)#说明是root骨骼
+			k.add_child(b)
 		
 		if i.has('length'):
 			b.set_length(i['length'])
 		
 		if i.has("rotation"):
-			b.rotation_degrees = i['rotation']*-1# 此处未处理不继承旋转的骨骼
+			b.rotation_degrees = i['rotation']*-1
 		
 		if i.has('transform'):
 			if i['transform'] == "noRotationOrReflection":
 				if i.has("rotation"):
-					b.global_rotation_degrees = i['rotation']*-1# 此处处理不继承旋转的骨骼
+					b.global_rotation_degrees = i['rotation']*-1
 			
 		
 		var pos = Vector2.ZERO
@@ -169,7 +443,6 @@ func 生成骨骼(json):
 		b.scale = sca
 		b.owner = node_2d
 	
-	# 生成IK
 	if json.data.has("ik"):
 		if json.data["ik"].size() > 0:
 			var msk = SkeletonModificationStack2D.new()
@@ -188,12 +461,10 @@ func 生成骨骼(json):
 							lookat.target_nodepath = k.get_path_to(s[IK目标])
 						msk.add_modification(lookat)
 					elif IK骨骼.size() == 2:
-						# 只导入两根骨骼的ik
 						var towik = SkeletonModification2DTwoBoneIK.new()
-						
 						towik.set_joint_one_bone2d_node(k.get_path_to(s[IK骨骼[0]]))
 						towik.set_joint_two_bone2d_node(k.get_path_to(s[IK骨骼[1]]))
-						var IK名 = i['name']# 没啥用
+						var IK名 = i['name']
 						if i.has('target'):
 							var IK目标 = i['target']
 							towik.target_nodepath = k.get_path_to(s[IK目标])
@@ -212,20 +483,18 @@ func parse_weights(data: Array) -> Array:
 	var i = 0
 
 	while i < data.size():
-		var num_bones = data[i]  # 当前点参与的骨骼数量
+		var num_bones = data[i]
 		var bones_and_weights = []
-		i += 1  # 移动到骨骼号
+		i += 1
 
-		# 遍历每个骨骼号和对应的权重
 		for _i in range(num_bones):
 			var bone_id = data[i]
 			var x = data[i + 1]
 			var y = data[i + 2]
 			var weight = data[i + 3]
 			bones_and_weights.append({"bone_id": bone_id,"x": x,"y": y, "weight": weight})
-			i += 4  # 每个骨骼号和权重占用4个位置
+			i += 4
 
-		# 将解析后的骨骼和权重加入结果
 		result.append(bones_and_weights)
 	return result
 
@@ -233,38 +502,36 @@ func 生成插槽(json,s,k):
 	var c:Dictionary = {}
 	var z = 0
 	for i in json.data["slots"]:
-		var _c = 插槽.new()#用于切换子项
+		var _c = 插槽.new()
 		_c.name = i["name"]
-		var p = i["bone"]# 父级
+		var p = i["bone"]
 		s[p].add_child(_c)
 		_c.owner = node_2d
 		_c.z_index = z
-		_c.z_as_relative = false#由于层级不同，所以采用全局z顺序
-		z+=1# 显示顺序，最大4096
+		_c.z_as_relative = false
+		z+=1
 		c[i['name']] = _c
 		if i.has("color"):
 			_c.modulate = Color(i["color"])
 	
-	# 判断有没有皮肤
 	var 皮肤 = [0]
 	if json.data["skins"].size() > 1:
 		皮肤 = [0,1]
 	
 	for _p in 皮肤:
 		var attachments = json.data["skins"][_p]["attachments"]
-		for i in attachments:# 拿到插槽名字
-			var _c = c[i]# 获取刚生成的插槽节点
-			for i2 in attachments[i]:# 拿到网格或图片名字
+		for i in attachments:
+			var _c = c[i]
+			for i2 in attachments[i]:
 				var a = attachments[i][i2]
-				var _item# 网格或图片引用
+				var _item
 				
-				if a.has("type"):# 如果有类型说明是网格
+				if a.has("type"):
 					if a["type"] == "mesh":
-						# 加载图片
 						var 图片名 = i2
 						if a.has('name'):
 							图片名 = a['name']
-						if a.has("path"):# 有路径说明改名字了
+						if a.has("path"):
 							图片名 = a["path"]
 						var _poly = Polygon2D.new()
 						_item = _poly
@@ -272,8 +539,6 @@ func 生成插槽(json,s,k):
 						_poly.name = i2
 						_c.add_child(_poly)
 						_poly.owner = node_2d
-						#_poly.z_index = _c.z_index# 控制显示顺序
-						
 						
 						var uvs:PackedVector2Array = []
 						var _uvs = a["uvs"]
@@ -283,14 +548,12 @@ func 生成插槽(json,s,k):
 							uvs.append(Vector2(_uvs[_i]*_uvw,_uvs[_i+1]*_uvh))
 						_poly.uv = uvs
 						
-						# 获取插槽的父骨骼
 						var 插槽骨名 = ""
 						for _i in json.data["slots"]:
 							if i == _i["name"]:
 								插槽骨名 = _i["bone"]
 						var points:PackedVector2Array = []
 						var _ver = a["vertices"]
-						# 如果UV数据比顶点数据多，说明有权重信息
 						if _uvs.size() < _ver.size():
 							var _weights = parse_weights(_ver)
 							for _i in _weights:
@@ -300,22 +563,21 @@ func 生成插槽(json,s,k):
 								while true:
 									var 旋转值 = 0
 									if 骨骼数据.has("rotation"):
-										旋转值 = 骨骼数据['rotation']#计算顶点不需要*-1
-									if 骨骼数据.has("transform"):# 如果骨骼不继承父骨骼的旋转，通常是IK的脚
+										旋转值 = 骨骼数据['rotation']
+									if 骨骼数据.has("transform"):
 										if 骨骼数据["transform"] == "noRotationOrReflection":
-											旋转值 = s[插槽骨名].rotation_degrees*-1# 获取已经生成骨骼的旋转并还原-1
+											旋转值 = s[插槽骨名].rotation_degrees*-1
 											print("遇到一个不继承旋转的骨骼")
 									var pos = Vector2.ZERO
 									if 骨骼数据.has("x"):
 										pos.x = 骨骼数据['x']
 									if 骨骼数据.has("y"):
-										pos.y = 骨骼数据['y']#计算顶点不需要*-1
+										pos.y = 骨骼数据['y']
 									var sca = Vector2.ONE
 									if 骨骼数据.has("scaleX"):
 										sca.x = 骨骼数据['scaleX']
 									if 骨骼数据.has("scaleY"):
 										sca.y = 骨骼数据['scaleY']
-									# 先旋转后加
 									if 骨骼数据["name"] != 插槽骨名:
 										最终坐标 = (最终坐标*sca).rotated(deg_to_rad(旋转值))+pos
 									else:
@@ -332,7 +594,7 @@ func 生成插槽(json,s,k):
 								points.append(最终坐标)
 						else:
 							for _i in range(0, _ver.size(), 2):
-								points.append(Vector2(_ver[_i],_ver[_i+1]*-1))# 网格点Y需要*-1
+								points.append(Vector2(_ver[_i],_ver[_i+1]*-1))
 						_poly.polygon = points
 						_poly.internal_vertex_count = _uvs.size()/2-a["hull"]
 						
@@ -346,30 +608,25 @@ func 生成插槽(json,s,k):
 							trianles.push_back(_t)
 						_poly.polygons = trianles
 						
-						# 生成权重数据
-						# 如果UV数据比顶点数据多，说明有权重信息
 						if _uvs.size() < _ver.size():
 							_c.owner = null
-							_c.reparent(node_2d)# 带权重的网格需要放置到外面
-							_c.owner = node_2d# 防止警告
-							_poly.owner = node_2d# 重新赋予
-							_poly.skeleton = _poly.get_path_to(k)# 没有权重不需要骨架
+							_c.reparent(node_2d)
+							_c.owner = node_2d
+							_poly.owner = node_2d
+							_poly.skeleton = _poly.get_path_to(k)
 
 							var _weights = parse_weights(_ver)
 						
 							var new_bones = []
 							var _sn = 0
-							# 遍历所有骨骼
 							for _i in s:
 								var new_qz:PackedFloat32Array = []
-								for _a in range(_poly.polygon.size()):# _a是遍历的当前点号
+								for _a in range(_poly.polygon.size()):
 									var 权重 = 0.0
-									# 找到所有当前骨骼当前点的权重
 									for ii in _weights[_a]:
 										if ii['bone_id'] == _sn:
 											权重 = ii['weight']
 									new_qz.append(权重)
-								# 判断权重是否部为0，删去
 								var _isq = false
 								for _q in new_qz:
 									if _q != 0:
@@ -379,26 +636,22 @@ func 生成插槽(json,s,k):
 									new_bones.append(new_qz)
 								_sn += 1
 							_poly.bones = new_bones
-							# 有权重网格才需要这样
 							var _gp = _poly.global_position
 							var _gr = _poly.global_rotation
-							#_poly.top_level = true# 网格本身不能受到骨骼影响，只会受到权重影响
 							_poly.global_position = _gp
 							_poly.global_rotation = _gr
 						
-						# 隐藏插槽只能显示一个东西
 						_poly.visible = false
 						for _i in json.data["slots"]:
 							if _i.has("attachment"):
 								if _i["attachment"] == i2:
 									_poly.visible = true
 						
-				else:# 如果没有类型说明就是图片
-					# 加载图片
+				else:
 					var 图片名 = i2
 					if a.has('name'):
 						图片名 = a['name']
-					if a.has("path"):# 有路径说明改名字了
+					if a.has("path"):
 						图片名 = a["path"]
 					var _sprite = Sprite2D.new()
 					_item = _sprite
@@ -424,7 +677,6 @@ func 生成插槽(json,s,k):
 						sca.y = a['scaleY']
 					_sprite.scale = sca
 					
-					# 隐藏插槽只能显示一个东西
 					_sprite.visible = false
 					
 					for _i in json.data["slots"]:
@@ -432,16 +684,14 @@ func 生成插槽(json,s,k):
 							if _i["attachment"] == i2:
 								_sprite.visible = true
 				
-				# 给add模式的网格或图片加上材质
 				if _item:
 					for _i in json.data["slots"]:
-						# 找到与图片对应的插槽，查看渲染混合模式是否为add
 						if _i.has("blend"):
 							var _add = false
 							if _i.has("attachment"):
 								if _i["attachment"] == i2:
 									_add = true
-							if _i['name'] == _item.get_parent().name:# 图片的话插槽信息没有，所以只能判断父层级名字
+							if _i['name'] == _item.get_parent().name:
 								_add = true
 							if _add:
 								if _i["blend"] == "additive":
@@ -469,7 +719,7 @@ func 创建动画(json,s,k,c):
 				if 插槽动画数据[插槽名].has("color"):
 					var 颜色帧 = 插槽动画数据[插槽名]["color"]
 					var 插槽径 =  str(node_2d.get_path_to(c[插槽名])) + ":modulate"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_path(track_index, 插槽径)
 					for _y in 颜色帧:
 						var 延迟 = 0
@@ -486,12 +736,10 @@ func 创建动画(json,s,k,c):
 					var 切换帧 = 插槽动画数据[插槽名]["attachment"]
 					
 					var 插槽径 =  str(node_2d.get_path_to(c[插槽名])) + ":切换名"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_path(track_index, 插槽径)
-					# 离散更新模式，保证只切换帧一次，而不是很多次
 					animation.value_track_set_update_mode(track_index,Animation.UPDATE_DISCRETE)
 					animation.track_set_interpolation_type(track_index,Animation.INTERPOLATION_NEAREST)
-					
 					
 					for _q in 切换帧:
 						var 延迟 = 0
@@ -504,7 +752,6 @@ func 创建动画(json,s,k,c):
 							切换值 = str(_q["name"])
 						animation.track_insert_key(track_index,延迟, 切换值)
 		
-		# 导入顶点动画轨道
 		if lg_anim[i].has("deform"):
 			var 顶点动画数据 = lg_anim[i]["deform"]["default"]
 			for 插槽名 in 顶点动画数据:
@@ -512,7 +759,7 @@ func 创建动画(json,s,k,c):
 					var 顶点帧 = 顶点动画数据[插槽名][网格名]
 					var _poly = c[插槽名].find_child(网格名)
 					var 顶点径 =  str(node_2d.get_path_to(_poly)) + ":polygon"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_path(track_index, 顶点径)
 					for _vd in 顶点帧:
 						var 延迟 = 0
@@ -524,56 +771,39 @@ func 创建动画(json,s,k,c):
 								预估时长 = 延迟
 						if _vd.has('offset'):
 							_offset = _vd['offset']
-						if _vd.has('vertices') and _poly.bones.size() == 0:# 说明这个网格无权重
-							var _vds = _vd['vertices']# 拷贝顶点数组
+						if _vd.has('vertices') and _poly.bones.size() == 0:
+							var _vds = _vd['vertices']
 							for _o in range(_offset):
-								_vds.push_front(0)# 补全数组，spine的顶点数组不全
-							if _vds.size()%2 == 1:# 如果是奇数，在末尾补0
+								_vds.push_front(0)
+							if _vds.size()%2 == 1:
 								_vds.push_back(0)
 							var _vn = 0
-							for _i in range(0, _vds.size(), 2):# 把数组变成vector2数组
-								_vertices[_vn] += Vector2(_vds[_i],_vds[_i+1]*-1)# 此时是vector相加
+							for _i in range(0, _vds.size(), 2):
+								_vertices[_vn] += Vector2(_vds[_i],_vds[_i+1]*-1)
 								_vn += 1
-						if _vd.has('vertices') and _poly.bones.size() > 0:# 说明这个网格有权重
-							var _vds = _vd['vertices']# 拷贝顶点数组
-							if int(_offset)%2==1:# 如果是奇数前面加0
+						if _vd.has('vertices') and _poly.bones.size() > 0:
+							var _vds = _vd['vertices']
+							if int(_offset)%2==1:
 								_vds.push_front(0)
-								_offset-=1# 说明缺少第一个点的x轴
-							if _vds.size()%2==1:# 说明最后一个点缺少y轴
+								_offset-=1
+							if _vds.size()%2==1:
 								_vds.push_back(0)
-							# 获取该顶点受到几根骨骼影响
-							# 这里忽略皮肤
 							var 权重网格 = json.data['skins'][0]['attachments'][插槽名][网格名]["vertices"]
 							var _weights = parse_weights(权重网格)
-							"""
-							print("---------------------------")
-							print("点数："+str(_weights.size()))
-							print("动画名:"+str(动画名))
-							print("插槽名:"+str(插槽名))
-							print("网格名:"+str(网格名))
-							print("poly顶点数组数量："+str(_vertices.size()))
-							print("顶点动画数组数量："+str(_vds.size()))
-							print("权重网格数量:"+str(_weights.size()))
-							"""
-							var 点数组 = []# 构造空点数组
+							var 点数组 = []
 							var _wn = 0
 							for _w in _weights:
-								#print("_wn:"+str(_wn*2)+"   _offset:"+str(_offset))
 								if _offset <= _wn*2 and (_wn*2-_offset)+1 < _vds.size():
-									#print("---------------:"+str(_wn*2-_offset))
 									var 最终坐标 = Vector2(_vds[(_wn*2-_offset)], _vds[(_wn*2-_offset)+1])
 									最终坐标.y *= -1
 									点数组.append(最终坐标)
 								else:
 									点数组.append(Vector2(0,0))
 								_wn += _w.size()
-							# 根据offset将动画数据加入到空点数组中
 							
-							#print(点数组)
-							#print("点数组数量："+str(点数组.size()))
 							var _vn = 0
 							for _i in 点数组:
-								_vertices[_vn] += _i# 受到骨骼权重影响
+								_vertices[_vn] += _i
 								_vn += 1
 						animation.track_insert_key(track_index,延迟, _vertices)
 		
@@ -581,11 +811,10 @@ func 创建动画(json,s,k,c):
 			var 骨骼动画数据 = lg_anim[i]["bones"]
 			for 骨名 in 骨骼动画数据:
 				if 骨骼动画数据[骨名].has("translate"):
-					# 获取当前骨骼的原始变换
 					var 原始变换 = s[骨名].position
 					var 变换帧 = 骨骼动画数据[骨名]["translate"]
 					var 骨路径 =  str(node_2d.get_path_to(s[骨名])) + ":position"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_path(track_index, 骨路径)
 					for _t in 变换帧:
 						var 延迟 = 0
@@ -605,12 +834,10 @@ func 创建动画(json,s,k,c):
 						animation.track_insert_key(track_index,延迟, 变换值)
 					
 				if 骨骼动画数据[骨名].has("rotate"):
-					# 获取当前骨骼的旋转值，单位度数
 					var 原始旋转值 = s[骨名].rotation_degrees
 					var 旋转帧 = 骨骼动画数据[骨名]["rotate"]
 					var 骨路径 =  str(node_2d.get_path_to(s[骨名])) + ":rotation"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
-					# 解决欧拉角 的旋转插值方式造成的逆向旋转BUG
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_interpolation_type(track_index,Animation.INTERPOLATION_LINEAR_ANGLE)
 					animation.track_set_path(track_index, 骨路径)
 					for _r in 旋转帧:
@@ -627,11 +854,10 @@ func 创建动画(json,s,k,c):
 						animation.track_insert_key(track_index,延迟, deg_to_rad(旋转值))
 				
 				if 骨骼动画数据[骨名].has("scale"):
-					# 获取当前骨骼的原始缩放
 					var 原始缩放 = s[骨名].scale
 					var 缩放帧 = 骨骼动画数据[骨名]["scale"]
 					var 骨路径 =  str(node_2d.get_path_to(s[骨名])) + ":scale"
-					var track_index = animation.add_track(Animation.TYPE_VALUE)# 添加轨道
+					var track_index = animation.add_track(Animation.TYPE_VALUE)
 					animation.track_set_path(track_index, 骨路径)
 					for _s in 缩放帧:
 						var 延迟 = 0
@@ -652,7 +878,6 @@ func 创建动画(json,s,k,c):
 		
 		animation.set_length(预估时长)
 		
-		# 检测动画名是否合法，不能包括“[]”
 		动画名 = 动画名.replace("[","_")
 		动画名 = 动画名.replace("]","_")
 		动画名 = 动画名.replace("/","_")
@@ -673,20 +898,17 @@ func 创建动画(json,s,k,c):
 	if autoplay_anim_name != "":
 		animplay.autoplay = autoplay_anim_name
 	
-	#region 创建默认初始化姿势
-	# 创建默认初始化姿势
 	var 全局库 = AnimationLibrary.new()
 	animplay.add_animation_library("",全局库)
 	var global_library = animplay.get_animation_library("")
 	var RESET_anim = Animation.new()
 	RESET_anim.set_length(0.001)
 	global_library.add_animation("RESET", RESET_anim)
-	# 初始化所有插槽
+	
 	for i in c:
 		var 插槽径 =  str(node_2d.get_path_to(c[i])) + ":切换名"
-		var track_index = RESET_anim.add_track(Animation.TYPE_VALUE)# 添加轨道
+		var track_index = RESET_anim.add_track(Animation.TYPE_VALUE)
 		RESET_anim.track_set_path(track_index, 插槽径)
-		# 离散更新模式，保证只切换帧一次，而不是很多次
 		RESET_anim.value_track_set_update_mode(track_index,Animation.UPDATE_DISCRETE)
 		RESET_anim.track_set_interpolation_type(track_index,Animation.INTERPOLATION_NEAREST)
 		var 子项 = c[i].get_children()
@@ -697,28 +919,35 @@ func 创建动画(json,s,k,c):
 		RESET_anim.track_insert_key(track_index,0.0, 切换名)
 		
 		var 插槽颜色径 =  str(node_2d.get_path_to(c[i])) + ":modulate"
-		var track_index2 = RESET_anim.add_track(Animation.TYPE_VALUE)# 添加轨道
+		var track_index2 = RESET_anim.add_track(Animation.TYPE_VALUE)
 		RESET_anim.track_set_path(track_index2, 插槽颜色径)
 		RESET_anim.track_insert_key(track_index2,0.0, c[i].modulate)
 		
-	# 初始化所有骨骼
 	for i in s:
 		var 骨骼位置径 =  str(node_2d.get_path_to(s[i])) + ":position"
-		var track_index = RESET_anim.add_track(Animation.TYPE_VALUE)# 添加轨道
+		var track_index = RESET_anim.add_track(Animation.TYPE_VALUE)
 		RESET_anim.track_set_path(track_index, 骨骼位置径)
 		RESET_anim.track_insert_key(track_index,0.0, s[i].position)
 		
 		var 骨骼旋转径 =  str(node_2d.get_path_to(s[i])) + ":rotation"
-		var track_index2 = RESET_anim.add_track(Animation.TYPE_VALUE)# 添加轨道
+		var track_index2 = RESET_anim.add_track(Animation.TYPE_VALUE)
 		RESET_anim.track_set_path(track_index2, 骨骼旋转径)
 		RESET_anim.track_insert_key(track_index2,0.0, s[i].rotation)
 		RESET_anim.value_track_set_update_mode(track_index2,Animation.UPDATE_DISCRETE)
-		# 必须要跟上面所有动画的插值类型一样才不会警告
 		RESET_anim.track_set_interpolation_type(track_index2,Animation.INTERPOLATION_LINEAR_ANGLE)
 		
 		var 骨骼缩放径 =  str(node_2d.get_path_to(s[i])) + ":scale"
-		var track_index3 = RESET_anim.add_track(Animation.TYPE_VALUE)# 添加轨道
+		var track_index3 = RESET_anim.add_track(Animation.TYPE_VALUE)
 		RESET_anim.track_set_path(track_index3, 骨骼缩放径)
 		RESET_anim.track_insert_key(track_index3,0.0, s[i].scale)
-	#endregion
-		
+"""
+
+static func get_files() -> Dictionary:
+	return {
+		"spine_to_godot_slot.gd": SPINE_TO_GODOT_SLOT_GD,
+		"插槽.gd": SLOT_ALIAS_GD,
+		"spine_to_godot_skin_manager.gd": SPINE_TO_GODOT_SKIN_MANAGER_GD,
+		"no_rotation.gd": NO_ROTATION_GD,
+		"plugin.cfg": PLUGIN_CFG,
+		"spine.gd": SPINE_PLUGIN_GD
+	}

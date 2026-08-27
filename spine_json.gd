@@ -488,6 +488,7 @@ func adjust_angle(A: float, B: float) -> float:
 func 生成骨骼(json):
 	var k = Skeleton2D.new()
 	k.name = "Skeleton2D"
+	k.visible = false
 	node_2d.add_child(k)
 	k.owner = node_2d
 	
@@ -1003,7 +1004,8 @@ func 创建动画(json,s,_k,c):
 	animplay.name = "AnimationPlayer"
 	
 	var al = AnimationLibrary.new()
-	var lg_anim = json.data['animations']
+	var lg_anim = json.data.get('animations', {})
+	var autoplay_anim_name = ""
 	for i in lg_anim:
 		var animation = Animation.new()
 		var 动画名 = i
@@ -1481,10 +1483,22 @@ func 创建动画(json,s,_k,c):
 		动画名 = 动画名.replace("[","_")
 		动画名 = 动画名.replace("]","_")
 		动画名 = 动画名.replace("/","_")
+		
+		var name_lower = 动画名.to_lower()
+		if name_lower == "idel":
+			animation.loop_mode = Animation.LOOP_LINEAR
+			autoplay_anim_name = "animations/" + 动画名
+		elif name_lower == "idle":
+			animation.loop_mode = Animation.LOOP_LINEAR
+			if autoplay_anim_name == "" or not autoplay_anim_name.to_lower().ends_with("/idel"):
+				autoplay_anim_name = "animations/" + 动画名
+		
 		al.add_animation(动画名,animation)
 		
 	var anim_library_name = "animations"
 	animplay.add_animation_library(anim_library_name,al)
+	if autoplay_anim_name != "":
+		animplay.autoplay = autoplay_anim_name
 	
 	#region 创建默认初始化姿势
 	# 创建默认初始化姿势
