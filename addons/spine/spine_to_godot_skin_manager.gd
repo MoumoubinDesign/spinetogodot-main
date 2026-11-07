@@ -14,6 +14,9 @@ extends Node
 ## 全量皮肤切片与网格数据包
 @export var skins_data: Dictionary = {}
 
+## 图集缩放比例 (相对于Spine工程设计分辨率)
+@export var atlas_scale: float = 1.0
+
 ## 当前激活的皮肤
 var _current_skin: String = "default"
 

@@ -20,6 +20,7 @@ func save_config() -> void:
 	config.set_value("paths", "return_path", %ReturnPath.text)
 	config.set_value("paths", "batch_path", %"LineEdit_批量路径".text)
 	config.set_value("paths", "last_addon_install_dir", last_addon_install_dir)
+	config.set_value("settings", "atlas_scale", %AtlasScale.text)
 	config.save(CONFIG_PATH)
 
 
@@ -33,6 +34,7 @@ func load_config() -> void:
 		%ReturnPath.text = config.get_value("paths", "return_path", %ReturnPath.text)
 		%"LineEdit_批量路径".text = config.get_value("paths", "batch_path", %"LineEdit_批量路径".text)
 		last_addon_install_dir = config.get_value("paths", "last_addon_install_dir", "")
+		%AtlasScale.text = config.get_value("settings", "atlas_scale", "自动")
 
 
 func _show_dialog(title: String, message: String) -> void:
@@ -119,6 +121,11 @@ func _on_button_pressed() -> void:
 	save_config()
 	spine_json.res图像路径 = %ResPath.text
 	spine_json.atlas路径 = %AtlasPath.text
+	var scale_txt = %AtlasScale.text.strip_edges()
+	if scale_txt == "" or scale_txt == "自动" or scale_txt.to_lower() == "auto":
+		spine_json.图集缩放 = 0.0
+	else:
+		spine_json.图集缩放 = scale_txt.to_float()
 	spine_json.保存文件(%JsonPath.text, %ReturnPath.text)
 
 
@@ -189,6 +196,7 @@ func on_安装脚本_dir_selected(path: String):
 func _on_批量转换_pressed() -> void:
 	save_config()
 	spine_json.使用atlas图集 = true
+	spine_json.图集缩放 = 0.0
 	var path = %"LineEdit_批量路径".text
 	var dir = DirAccess.open(path)
 	if dir:
@@ -216,6 +224,11 @@ func _on_预览_pressed() -> void:
 	save_config()
 	spine_json.res图像路径 = %ResPath.text
 	spine_json.atlas路径 = %AtlasPath.text
+	var scale_txt = %AtlasScale.text.strip_edges()
+	if scale_txt == "" or scale_txt == "自动" or scale_txt.to_lower() == "auto":
+		spine_json.图集缩放 = 0.0
+	else:
+		spine_json.图集缩放 = scale_txt.to_float()
 	Global.根节点 = spine_json.预览文件(%JsonPath.text)
 	get_tree().get_root().gui_embed_subwindows = false
 	var w = preload("res://Spine编辑器/编辑器窗口.tscn").instantiate()

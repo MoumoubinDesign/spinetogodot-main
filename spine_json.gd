@@ -46,6 +46,7 @@ var atlas路径 = ""
 var 图集数据 = {}
 var 图集Image
 var 是否浏览 = false
+var 图集缩放: float = 0.0 # 0.0 表示自动从图集与Json尺寸推导计算
 
 func _ready() -> void:
 	pass
@@ -62,6 +63,14 @@ func 保存文件(json路径,导出路径):
 	
 	var json = load(json路径)
 	
+	# 推导并获取图集打包缩放比
+	var atlas_scale: float = 1.0
+	if 图集缩放 > 0.0:
+		atlas_scale = 图集缩放
+	else:
+		atlas_scale = 推导图集缩放(json.data, 图集数据)
+	print("[SpineToGodot] 当前图集缩放比例 (Atlas Scale): ", atlas_scale)
+
 	# 创建换装管理器
 	var all_skin_names: Array[String] = []
 	if json.data.has("skins"):
@@ -78,12 +87,13 @@ func 保存文件(json路径,导出路径):
 	skin_mgr.name = "SpineToGodotSkinManager"
 	skin_mgr.set("available_skins", all_skin_names)
 	skin_mgr.set("current_skin", all_skin_names[0])
+	skin_mgr.set("atlas_scale", atlas_scale)
 	node_2d.add_child(skin_mgr)
 	skin_mgr.owner = node_2d
 
 	var g = 生成骨骼(json)
-	var c = 生成插槽(json,g[0],g[1])
-	创建动画(json,g[0],g[1],c)
+	var c = 生成插槽(json, g[0], g[1], atlas_scale)
+	创建动画(json, g[0], g[1], c)
 	
 	var scene = PackedScene.new()
 	scene.pack(node_2d)
@@ -102,6 +112,14 @@ func 预览文件(json路径):
 	
 	var json = load(json路径)
 	
+	# 推导并获取图集打包缩放比
+	var atlas_scale: float = 1.0
+	if 图集缩放 > 0.0:
+		atlas_scale = 图集缩放
+	else:
+		atlas_scale = 推导图集缩放(json.data, 图集数据)
+	print("[SpineToGodot] 当前图集缩放比例 (Atlas Scale): ", atlas_scale)
+
 	# 创建换装管理器
 	var all_skin_names: Array[String] = []
 	if json.data.has("skins"):
@@ -118,12 +136,13 @@ func 预览文件(json路径):
 	skin_mgr.name = "SpineToGodotSkinManager"
 	skin_mgr.set("available_skins", all_skin_names)
 	skin_mgr.set("current_skin", all_skin_names[0])
+	skin_mgr.set("atlas_scale", atlas_scale)
 	node_2d.add_child(skin_mgr)
 	skin_mgr.owner = node_2d
 
 	var g = 生成骨骼(json)
-	var c = 生成插槽(json,g[0],g[1])
-	创建动画(json,g[0],g[1],c)
+	var c = 生成插槽(json, g[0], g[1], atlas_scale)
+	创建动画(json, g[0], g[1], c)
 	return node_2d
 
 
@@ -283,6 +302,9 @@ func 加载atlas图集(atlas_path: String) -> Dictionary:
 						p_data["filter"] = val
 					"repeat":
 						p_data["repeat"] = val
+					"scale":
+						p_data["scale"] = val.to_float()
+						atlas_dict["scale"] = val.to_float()
 		else:
 			# 没有冒号的行：若以 .png 结尾或尚未有当前页，则为新图集页；否则为切片区域名称
 			if line.to_lower().ends_with(".png") or current_page == "":
@@ -321,6 +343,60 @@ func 加载atlas图集(atlas_path: String) -> Dictionary:
 	if atlas_dict["page_names"].size() > 0:
 		atlas_dict["图集图片名"] = atlas_dict["page_names"][0]
 	return atlas_dict
+
+
+# 自动推导图集打包缩放比例（通过比对 atlas 切片原始尺寸与 spine json 中附件的定义尺寸）
+func 推导图集缩放(json_data: Dictionary, atlas_data: Dictionary) -> float:
+	if atlas_data.has("scale") and atlas_data["scale"] > 0.0:
+		return atlas_data["scale"]
+	if atlas_data.has("pages"):
+		for p_name in atlas_data["pages"]:
+			var p_info = atlas_data["pages"][p_name]
+			if p_info.has("scale") and p_info["scale"] > 0.0:
+				return p_info["scale"]
+
+	var detected_scales: Array[float] = []
+	if json_data.has("skins"):
+		for sk in json_data["skins"]:
+			var sk_name = sk.get("name", "default")
+			var atts_map = sk.get("attachments", {})
+			for s_name in atts_map:
+				for a_name in atts_map[s_name]:
+					var a = atts_map[s_name][a_name]
+					var a_type = a.get("type", "region")
+					if a_type in ["region", "mesh"]:
+						var a_w = float(a.get("width", 0.0))
+						var a_h = float(a.get("height", 0.0))
+						if a_w > 0.0 or a_h > 0.0:
+							var r_info = find_atlas_region(atlas_data, sk_name, s_name, a_name, a)
+							if not r_info.is_empty():
+								var orig = r_info.get("orig", Vector2.ZERO)
+								var size = r_info.get("size", Vector2.ZERO)
+								var r_w = orig.x if orig.x > 0.0 else size.x
+								var r_h = orig.y if orig.y > 0.0 else size.y
+								if a_w > 0.0 and r_w > 0.0:
+									detected_scales.append(r_w / a_w)
+								elif a_h > 0.0 and r_h > 0.0:
+									detected_scales.append(r_h / a_h)
+					if detected_scales.size() >= 30:
+						break
+				if detected_scales.size() >= 30:
+					break
+			if detected_scales.size() >= 30:
+				break
+
+	if detected_scales.is_empty():
+		return 1.0
+
+	detected_scales.sort()
+	var median_scale = detected_scales[detected_scales.size() / 2]
+
+	var standard_scales = [0.125, 0.25, 0.333333, 0.5, 0.666667, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0]
+	for std_s in standard_scales:
+		if abs(median_scale - std_s) < 0.015:
+			return std_s
+
+	return snapped(median_scale, 0.0001)
 
 
 func _clean_skin_prefix(s: String) -> String:
@@ -690,7 +766,9 @@ func calculate_bone_world_matrix(bone_name: String, bone_data_map: Dictionary) -
 
 
 
-func 生成插槽(json,s,k):
+func 生成插槽(json, s, k, atlas_scale: float = 1.0):
+	if atlas_scale <= 0.0:
+		atlas_scale = 1.0
 	var visuals = CanvasGroup.new()
 	visuals.name = "Visuals"
 	node_2d.add_child(visuals)
@@ -759,10 +837,10 @@ func 生成插槽(json,s,k):
 				if att_type == "mesh":
 					var uvs: PackedVector2Array = []
 					var _uvs = a.get("uvs", [])
-					var _uvw = a.get("width", _size.x if _size.x > 0 else 100.0)
-					var _uvh = a.get("height", _size.y if _size.y > 0 else 100.0)
+					var _mesh_orig_w = _orig.x if _orig.x > 0.0 else (_size.x if _size.x > 0.0 else a.get("width", 100.0) * atlas_scale)
+					var _mesh_orig_h = _orig.y if _orig.y > 0.0 else (_size.y if _size.y > 0.0 else a.get("height", 100.0) * atlas_scale)
 					for _i in range(0, _uvs.size(), 2):
-						uvs.append(Vector2(_uvs[_i] * _uvw, _uvs[_i+1] * _uvh))
+						uvs.append(Vector2(_uvs[_i] * _mesh_orig_w, _uvs[_i+1] * _mesh_orig_h))
 
 					var _ver = a.get("vertices", [])
 					var points: PackedVector2Array = []
@@ -817,7 +895,7 @@ func 生成插槽(json,s,k):
 					skins_data[skin_name][slot_name][att_name] = {
 						"type": "mesh",
 						"page": page_name,
-						"texture_offset": Vector2(_xy.x, _xy.y),
+						"texture_offset": Vector2(_xy.x - _offset.x, _xy.y - _offset.y),
 						"uv": uvs,
 						"polygon": points,
 						"polygons": trianles,
@@ -834,6 +912,7 @@ func 生成插槽(json,s,k):
 					var sca = Vector2.ONE
 					if a.has("scaleX"): sca.x = a['scaleX']
 					if a.has("scaleY"): sca.y = a['scaleY']
+					var final_sca = sca / atlas_scale
 
 					skins_data[skin_name][slot_name][att_name] = {
 						"type": "region",
@@ -842,7 +921,7 @@ func 生成插槽(json,s,k):
 						"margin": Rect2(_offset.x, _offset.y, _orig.x - _size.x, _orig.y - _size.y),
 						"position": pos,
 						"rotation": rot,
-						"scale": sca
+						"scale": final_sca
 					}
 
 	# 3. 按照 slots 的声明顺序动态生成【单套插槽】与【单套 Visuals 节点】
@@ -933,7 +1012,7 @@ func 生成插槽(json,s,k):
 		if not def_att_data.is_empty() and not slot_is_mesh.get(slot_name, false):
 			remote.position = def_att_data.get("position", Vector2.ZERO)
 			remote.rotation_degrees = def_att_data.get("rotation", 0.0)
-			remote.scale = def_att_data.get("scale", Vector2.ONE)
+			remote.scale = def_att_data.get("scale", Vector2.ONE / atlas_scale)
 
 		if slot_has_weights.get(slot_name, false):
 			remote.update_position = false

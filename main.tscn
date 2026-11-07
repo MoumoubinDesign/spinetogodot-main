@@ -133,6 +133,20 @@ text = "C:\\Users\\26593\\Desktop\\导出\\spineboy-pro.tscn"
 layout_mode = 2
 text = "选择"
 
+[node name="HBoxContainer_Scale" type="HBoxContainer" parent="PanelContainer/MarginContainer/VBoxContainer2"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="PanelContainer/MarginContainer/VBoxContainer2/HBoxContainer_Scale"]
+layout_mode = 2
+text = "图集缩放："
+
+[node name="AtlasScale" type="LineEdit" parent="PanelContainer/MarginContainer/VBoxContainer2/HBoxContainer_Scale"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "自动"
+placeholder_text = "自动（默认根据图集与Json比值推导）"
+
 [node name="PanelContainer2" type="PanelContainer" parent="."]
 layout_mode = 0
 offset_left = 30.0
